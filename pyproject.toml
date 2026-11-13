@@ -1,0 +1,50 @@
+[project]
+name = "transmute"
+version = "0.1.0"
+description = "Transmute - open-source media & document converter that adapts to the machine it runs on (runtime capability probing, verify-before-replace, resource governor)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The Transmute Project" }]
+keywords = ["converter", "ffmpeg", "av1", "webp", "opus", "pdf", "media"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia",
+]
+
+# Runtime dependencies are deliberately minimal and all Apache/MIT/BSD-class or
+# otherwise redistributable-SDK Python packages. Engines (ffmpeg, ghostscript,
+# qpdf, LibreOffice, poppler, pandoc) are EXTERNAL system processes: the
+# bundle ships zero codec/engine binaries (see LICENSES.md, F26).
+dependencies = [
+    "Pillow>=10",
+    "pikepdf>=8",
+    "psutil>=5.9",
+    "platformdirs>=4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = [
+    "unit: fast, hermetic (no external engines required)",
+    "e2e: end-to-end smoke tests that require real system engines (ffmpeg etc.)",
+    "slow: takes more than a few seconds",
+]

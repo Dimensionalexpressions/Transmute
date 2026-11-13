@@ -13,3 +13,19 @@ __version__ = "0.1.0"
 
 APP_NAME = "Transmute"
 APP_ID = "transmute"
+
+
+def __getattr__(name):
+    """Lazy top-level re-exports so README examples work without importing
+    submodules eagerly (keeps import of `transmute` cheap)."""
+    _map = {
+        "EngineManager": "transmute.probe.engines",
+        "CapabilityProber": "transmute.probe.capability",
+        "CapabilityReport": "transmute.probe.capability",
+        "JobQueue": "transmute.runner.queue",
+    }
+    if name in _map:
+        import importlib
+        mod = importlib.import_module(_map[name])
+        return getattr(mod, name)
+    raise AttributeError(f"module 'transmute' has no attribute {name!r}")

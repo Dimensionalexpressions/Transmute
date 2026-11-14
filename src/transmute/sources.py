@@ -47,18 +47,25 @@ def category_of(path: Path | str) -> str | None:
     return _CATEGORY_OF.get(Path(path).suffix.lower())
 
 
-def is_ignored(path: Path) -> bool:
-    """True when a file must never be queued (hidden / partial / .skip-guarded)."""
+def is_ignored(path: Path, *, real_path: Path | None = None) -> bool:
+    """True when a file must never be queued (hidden / partial / .skip-guarded).
+
+    Hidden and partial checks look at the COMPONENTS OF `path` as given:
+    callers scanning or watching a tree pass the path RELATIVE TO THE SCAN ROOT,
+    because a dot-named ancestor ABOVE the chosen root (e.g. `~/.cache/downloads`)
+    is the user's business, not a hidden-file marker for files beneath that root.
+    Existence probes (the `.skip` sibling) run against REAL_PATH (default: `path`)
+    so relative callers in an arbitrary CWD still probe the real file.
+    """
     p = Path(path)
+    probe = Path(real_path) if real_path is not None else p
     name = p.name
     if any(part.startswith(".") for part in p.parts):
         return True
     low = name.lower()
     if any(low.endswith(suf) for suf in PARTIAL_SUFFIXES):
         return True
-    if p.is_file() and p.with_name(name + SKIP_SUFFIX).exists():
-        return True
-    return p.with_name(name + SKIP_SUFFIX).exists()
+    return probe.with_name(name + SKIP_SUFFIX).exists()
 
 
 def skip_guarded(path: Path) -> bool:
@@ -82,5 +89,6 @@ def iter_supported_files(root: Path) -> "os.PathLike | None":
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for fn in filenames:
             fp = Path(dirpath) / fn
-            if fp.suffix.lower() in _CATEGORY_OF and not is_ignored(fp):
+            if fp.suffix.lower() in _CATEGORY_OF and not is_ignored(
+                    fp.relative_to(root), real_path=fp):
                 yield fp

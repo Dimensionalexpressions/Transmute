@@ -156,6 +156,46 @@ What P3 actually delivers (tested, not claimed):
   -frames:v 1` into a temp dir; un-decodable input says "preview
   unavailable" — measured as unmeasurable, never a invented picture (F3).
 
+## P4 gate evidence (watch folders; commands from repo root)
+
+```
+$ TRANSMUTE_ROOT=$PWD/.gui-live .venv/bin/python -m pytest -q tests/test_watch.py
+15 passed in 11.37s                   # unit tier on real kernel FS events
+                                      # (inotify): settle measured by
+                                      # (size, mtime_ns) quiet window, slow
+                                      # partial writes not dispatched early,
+                                      # rename storm = cancel / atomic-rename
+                                      # enqueue / dedupe, ignore rules,
+                                      # dst-loop guards, callback errors
+                                      # captured + poll thread survives,
+                                      # journal end-to-end (queued record +
+                                      # job_queued event under the portable
+                                      # root), CLI TERM exits 0
+
+$ TRANSMUTE_ROOT=$PWD/.gui-live .venv/bin/python -m pytest -q tests/test_sources_rules.py
+4 passed                              # ignore rules scoped to the chosen
+                                      # root; .skip marker anchored probes
+
+$ TRANSMUTE_ROOT=$PWD/.gui-live .venv/bin/python -m pytest -q tests/
+110 passed in 52.44s                  # full suite, every tier, exit 0
+
+$ .venv/bin/python -m transmute.watch --help   # exits 0 without touching
+                                               # engines or running a probe
+
+# Live CLI smoke (script-driven, clean shell context), real drop → real probe
+# → queue journal → SIGTERM:
+SMOKE_EXIT=0
+watching …/smoke-watch/in -> …/smoke-watch/out (Ctrl-C to stop)
+INFO __main__: watch queued drop.png -> drop.webp (image/webp)
+{"event":"journal","job_id":"b3ddfb87e02e0b59",
+ "src":"…/smoke-watch/in/sub/drop.png","dst":"…/smoke-watch/out/sub/drop.webp",
+ "category":"image","state":"queued",…}
+```
+
+The journal landing under `$TRANSMUTE_ROOT/state/` with the mirrored
+destination (`out/sub/…`) is the F24+F25 proof: queue-only doctrine (the CLI
+never converts), portable-mode honored, tree mirroring on by default.
+
 ## What P1 actually proves (measured, not claimed)
 
 - **Capability probe** parses 226 encoders from real ffmpeg, trial-encodes
@@ -173,6 +213,33 @@ What P3 actually delivers (tested, not claimed):
 - **Governor load test**: 32 ffmpeg hammers, CPU feedback loop, measured
   window mean ≤85% (observed ~55% with cap 80 — sawtooth stops more than
   needed), ≥1 child stopped at peak, all children resume/exit cleanly.
+
+## Bugs found & fixed during P4 (kept as regression tests)
+
+- `paths.temp_paths()` raised `UnboundLocalError` on entry: the `finally`
+  reassigned the module default without `global`. Latent since P1 (no caller
+  until the P4 journal e2e test used it) — the test tier exposed a core bug
+  the CLI never hit. Fix: `global _default`.
+- **Silent-miss watcher bug**: `is_ignored()` judged hidden-ness from ALL
+  components of the ABSOLUTE path, so a watch/scan root that merely lives
+  under a dot-named folder (`~/.cache/inbox`, `.local/…`) silently swallowed
+  every drop — zero errors, zero dispatches. Live smoke caught it after the
+  pytest harness (tmp_path, no dot ancestors) had gone green 15 times; the
+  harness could not see it by construction. Fix: ignore rules are scoped to
+  the caller's root (pass the relative path), existence probes use an anchor;
+  the GUI drop path judges the NAME only, since dragging files in is an
+  explicit user act. Regression: `tests/test_sources_rules.py` + dot-rooted
+  watch test.
+- F25 mirror gap: `dst_for()` is flat, so watch drops from subfolders would
+  have collapsed the tree; the queue callback now passes `folder.dst / rel`.
+- CLI signal ordering: SIGTERM/SIGINT handlers were installed AFTER the
+  controller import, so a signal during the startup window hit the default
+  kill (observed as exit 143 in the first live smokes — part of the early
+  143 noise was also harness PID-namespace aliasing, which the clean
+  script-context retest ruled out). Handlers now install before any slow
+  import; `test_cli_sigterm_stops_cleanly` pins exit 0. The startup banner
+  additionally got `flush=True` (a pipe-buffered "watching" line hid the
+  process's state from supervisors).
 
 ## Bugs found & fixed during P3 (kept as regression tests)
 
@@ -253,9 +320,11 @@ What P3 actually delivers (tested, not claimed):
   simulated here, real CI matrix in P5.
 - Deep PDF (ghostscript) is lossy — only on explicit opt-in, and the GUI
   checkbox is labelled "Deep PDF pass (LOSSY recompress)" (P2 ✅).
-- F24 watch folders, packaging, LICENSES.md: P4/P8. LICENSES.md
-  will be compiled from fetched license files only (P8) — nothing is
-  bundled yet, so there is nothing to honestly document today.
+- F24 watch folders: core + CLI shipped in P4 (tests + live smoke green);
+  the GUI watch-settings panel is NOT built — drops land in the queue only
+  via `python -m transmute.watch`. GUI polish + packaging are P5/P7/P8.
+  LICENSES.md will be compiled from fetched license files only (P8) —
+  nothing is bundled yet, so there is nothing to honestly document today.
 - Edge gap (documented, deliberately unfixed): a machine where ffmpeg exists
   but **zero video encoders verify** has no video targets in the GUI matrix,
   so remux is unreachable through the GUI even though remux itself needs no

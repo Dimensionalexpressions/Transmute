@@ -28,3 +28,10 @@ portable.ini
 
 # harness staging artifacts (not project)
 .dsh-staging/
+
+# local scratch roots (probe caches, suite logs)
+.smoke-*/
+.gui-live/
+.suite-full.log
+.gui-probe.log
+smoke-watch/

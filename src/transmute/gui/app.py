@@ -195,7 +195,9 @@ class MainWindow(QMainWindow):
 
     def _add_one(self, path: Path) -> None:
         from ..sources import category_of, is_ignored
-        if is_ignored(path):
+        # the user picked these files explicitly: judge hidden/partial rules on
+        # the NAME only — ancestors above their folder are the user's business
+        if is_ignored(path.name, real_path=path):
             return
         if self.files.findItems(str(path), Qt.MatchFlag.MatchExactly):
             return

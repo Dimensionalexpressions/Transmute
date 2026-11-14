@@ -25,6 +25,7 @@ dependencies = [
     "pikepdf>=8",
     "psutil>=5.9",
     "platformdirs>=4",
+    "watchdog>=6",  # F24 watch folders: inotify on Linux, RDCW on Windows (P6)
 ]
 
 [project.optional-dependencies]

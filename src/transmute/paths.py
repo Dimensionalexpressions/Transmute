@@ -102,6 +102,7 @@ def set_paths(p: AppPaths) -> None:
 @contextmanager
 def temp_paths(root: Path) -> Iterator[AppPaths]:
     """Context manager used by tests: point the whole app footprint at a tmp dir."""
+    global _default
     saved = _default
     try:
         p = AppPaths(root=root)

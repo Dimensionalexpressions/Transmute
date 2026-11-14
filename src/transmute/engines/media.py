@@ -1,7 +1,16 @@
-"""ffprobe helpers shared by video/audio engines (verification, F24 skip logic)."""
+"""ffprobe helpers shared by video/audio engines (verification, F24 skip logic).
+
+Also hosts the F2 remux proof: the ONLY acceptable evidence that a "remux"
+never re-encoded is hash-comparing the actual compressed video bitstream of
+source and output after demuxing both through ffmpeg (raw-stream extraction
+normalises container differences: MP4 length-prefixed vs MKV Annex-B both
+become the same elementary stream).
+"""
 from __future__ import annotations
 
+import hashlib
 import json
+import tempfile
 from pathlib import Path
 
 from ..probe.engines import EngineManager
@@ -106,3 +115,51 @@ class Probe:
 
 def is_hdr_transfer(transfer: str | None) -> bool:
     return (transfer or "").lower() in ("smpte2084", "arib-std-b67", "smpte2086")
+
+
+# ------------------------------------------------------------------ F2 remux proof
+# ffmpeg raw muxers per codec: extracting through these normalises container
+# framing, so identical compressed samples -> identical bytes -> identical hash.
+RAW_MUXER_BY_CODEC = {"h264": "h264", "hevc": "hevc",
+                      "vp8": "ivf", "vp9": "ivf", "av1": "ivf", "mp3": "mp3"}
+
+
+def extract_video_bitstream_sha256(engines: EngineManager | None, path: Path,
+                                   codec: str | None) -> str | None:
+    """sha256 of the demuxed video elementary stream, or None if this box's
+    ffmpeg cannot extract that codec (unknown codec / no raw muxer / failure).
+    Writes to a temp FILE: run_command captures text, which is not binary-safe."""
+    raw = RAW_MUXER_BY_CODEC.get((codec or "").lower())
+    ffmpeg = (engines or EngineManager()).path("ffmpeg")
+    if raw is None or ffmpeg is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="transmute-proof-") as td:
+        rawp = Path(td) / f"stream.{raw}"
+        res = run_command(
+            [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+             "-i", path, "-map", "0:v:0", "-c:v", "copy",
+             "-f", raw, "-y", rawp], timeout_s=600)
+        if not res.ok or not rawp.is_file() or rawp.stat().st_size == 0:
+            return None
+        h = hashlib.sha256()
+        with open(rawp, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+
+def packet_manifest_sha256(engines: EngineManager | None, path: Path) -> str | None:
+    """Weaker fallback proof for codecs without a raw muxer: hash of the
+    ordered per-packet (size, flags, stream) metadata of every stream.
+    Catches re-encode (packet sizes change) but is labelled honestly -
+    it is NOT a bitstream hash."""
+    ffprobe = (engines or EngineManager()).path("ffprobe")
+    if ffprobe is None:
+        return None
+    res = run_command(
+        [ffprobe, "-v", "error", "-show_packets",
+         "-show_entries", "packet=stream_index,size,flags,duration",
+         "-of", "csv=p=0", str(path)], timeout_s=600)
+    if not res.ok or not (res.stdout or "").strip():
+        return None
+    return hashlib.sha256(res.stdout.encode("utf-8", "surrogateescape")).hexdigest()

@@ -37,8 +37,26 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 3
-_PROBE_SALT = "p1f"  # bump to invalidate caches when trial logic changes
+SCHEMA_VERSION = 4
+_PROBE_SALT = "p3c"  # bump to invalidate caches when trial logic changes
+# P3/F15: the ONLY tone-map chain the video engine may use, and the one the
+# probe actually executes (measure, don't parse: a build can list zscale/tonemap
+# yet fail to instantiate the chain, e.g. ffmpeg without libzimg).
+TONEMAP_VFILTER = ("zscale=t=linear:npl=100,format=gbrpf32le,"
+                   "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+                   "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+
+
+def _run_tonemap_trial(ffmpeg: Path) -> bool:
+    # tonemap REQUIRES input tagged HDR (and >=10-bit): an untagged synthetic
+    # source fails its input validation even on a fully capable build.
+    # Tagging the probe input PQ/bt2020 makes the trial match real usage.
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+           "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+           "-colorspace", "bt2020nc",
+           "-f", "lavfi", "-i", "color=c=black:s=64x32:d=0.2,format=yuv420p10le",
+           "-vf", TONEMAP_VFILTER, "-f", "null", "-"]
+    return run_command(cmd, timeout_s=25).ok
 
 # ---------------------------------------------------------------- encoder knowledge
 
@@ -116,6 +134,7 @@ class EncoderCapability:
     pix_fmts: list[str] = field(default_factory=list)
     depth: dict[str, bool] = field(default_factory=dict)  # {"8": T, "10": ?, "12": ?}
     compat_flag: bool = False
+    rgb_output: bool = False  # probe-measured: ffmpeg lists only RGB pixel formats
     reason: str = ""        # why not verified (stderr tail), blank when verified
     skipped: str = ""       # why never attempted ("gpu-disabled", "no gpu device nodes")
 
@@ -201,6 +220,14 @@ def _parse_encoder_list(stdout: str) -> list[tuple[str, str | None]]:
             declared = cm.group(1)
         out.append((name, declared))
     return out
+
+
+def rgb_only(pix_fmts: list[str]) -> bool:
+    """Probe-measured fact: ffmpeg offers this encoder ONLY RGB pixel formats
+    (e.g. libx264rgb -> RGB h264 that fails many hardware players). Such an
+    encoder must never win an automatic pick; an explicit user choice is
+    honoured. Derived from `ffmpeg -h encoder=NAME`, never from a name guess."""
+    return bool(pix_fmts) and not any("yuv" in f for f in pix_fmts)
 
 
 def _parse_pix_fmts(ffmpeg: Path, encoder: str) -> list[str]:
@@ -371,11 +398,17 @@ def _probe_pillow() -> dict[str, Any]:
 
 def _probe_ffmpeg_filters(ffmpeg: Path) -> dict[str, bool]:
     res = run_command([ffmpeg, "-hide_banner", "-filters"], timeout_s=25)
-    have = {"zscale": False, "tonemap": False}
+    have = {"zscale": False, "tonemap": False, "tonemap_chain": False}
+    # ffmpeg's flag-column width varies by version (2 chars in ffmpeg 9) -
+    # anchor on the IO spec (e.g. "V->V") instead of a fixed flag width.
+    pat = re.compile(r"^\s*[.TSCCUHB]+\s+([a-z0-9_]+)\s+[A-Z]{1,2}->[A-Z]{1,2}\b")
     for line in res.stdout.splitlines():
-        m = re.match(r"^\s*[TSCCUH][.TSCCUH]{5}\s+([a-z0-9_]+)\b", line)
+        m = pat.match(line)
         if m and m.group(1) in have:
             have[m.group(1)] = True
+    if have["zscale"] and have["tonemap"]:
+        # list-check is necessary, not sufficient: run the actual chain.
+        have["tonemap_chain"] = _run_tonemap_trial(ffmpeg)
     return have
 
 
@@ -431,7 +464,7 @@ class CapabilityProber:
         disable_gpu = gpu_force_disabled()
 
         caps: list[EncoderCapability] = []
-        filters = {"zscale": False, "tonemap": False}
+        filters = {"zscale": False, "tonemap": False, "tonemap_chain": False}
         if ffmpeg is None:
             caveats.append("ffmpeg not found: no codec capability can be probed; "
                            "video/audio matrix rows will be unavailable.")
@@ -463,10 +496,15 @@ class CapabilityProber:
                     cap.skipped = "image encoding handled via Pillow path"
                 else:
                     ok, fps, reason = _run_trial(_trial_cmd(ffmpeg, cap))
-                    if ok and cap.name in ("libaom-av1", "libsvtav1", "libvpx-vp9", "libx264",
-                                           "libx265", "libvpx") or (ok and cap.hw):
+                    if ok:
+                        # Measured for every verified VIDEO encoder: supported
+                        # pixel formats decide bit-depth claims AND whether the
+                        # encoder is RGB-only (ffmpeg reports plain bgr/rgb
+                        # formats, e.g. libx264rgb -> RGB h264 that fails many
+                        # hw players - must never win an automatic pick).
                         cap.pix_fmts = _parse_pix_fmts(ffmpeg, cap.name)
                         cap.depth = _depth_claims(cap.pix_fmts, cap.hw)
+                        cap.rgb_output = rgb_only(cap.pix_fmts)
                 cap.verified = ok
                 cap.fps = fps
                 cap.reason = reason if not ok else ""

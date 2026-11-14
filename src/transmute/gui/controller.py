@@ -21,6 +21,11 @@ from ..probe.capability import CapabilityReport, CapabilityProber
 _SUFFIX = {"vp8": ".webm", "vp9": ".webm"}
 
 
+# Suffixes the GUI offers as remux targets (F2). .ts is included although
+# rare: h264/hevc copy fine there and it is a real interop format.
+REMUX_CONTAINERS = (".mkv", ".mp4", ".webm", ".ts")
+
+
 @dataclass
 class TargetInfo:
     """One selectable conversion target for the picker."""
@@ -71,6 +76,9 @@ class ConverterController:
         self._paths = paths
         self._queue = queue
         self._report: CapabilityReport | None = None
+        # single reusable preview dir: each first_frame() call replaces the
+        # previous PNG in place - no temp dir per click
+        self._preview_dir: Path | None = None
 
     # ------------------------------------------------------------- report
     @property
@@ -162,20 +170,107 @@ class ConverterController:
         return "." + base
 
     def dst_for(self, src: Path | str, category: str, target: str,
-                dst_dir: Path | str) -> Path:
+                dst_dir: Path | str, *, ext: str | None = None) -> Path:
         src = Path(src)
         stem = src.stem if src.stem else "file"
-        return Path(dst_dir) / (stem + self.suffix_for(category, target))
+        suffix = ext if ext else self.suffix_for(category, target)
+        return Path(dst_dir) / (stem + suffix)
+
+    # ----------------------------------------------------- P3 video surfaces
+    @property
+    def tonemap_available(self) -> bool:
+        """True only when the zscale+tonemap chain PASSED its executed trial
+        on this machine (F15: capability is measured, never parsed)."""
+        try:
+            return bool(self.report.filters.get("tonemap_chain"))
+        except Exception:
+            return False
+
+    def remux_block_reason(self, src: Path | str, ext: str) -> str:
+        """'' when a lossless remux into `ext` is provably possible here.
+
+        Mirrors the engine's compat tables so the checkbox can stay visible
+        but greyed with the machine's own reason (F3) instead of failing at
+        run time; the engine still re-checks everything at execution.
+        """
+        from ..engines.media import Probe
+        from ..engines.video import (AUDIO_OK_BY_FORMAT, CONTAINER_BY_FORMAT,
+                                     REMUX_VIDEO_OK)
+        probe = Probe()
+        if not probe.available:
+            return "ffprobe missing: remux safety cannot be checked"
+        sv = probe.primary_video(Path(src))
+        if sv is None:
+            return "no video stream to remux"
+        fmt = CONTAINER_BY_FORMAT.get((ext or "").lower())
+        if fmt is None:
+            return f"unknown container '{ext}'"
+        vc = (sv.get("codec_name") or "").lower()
+        ok_v = REMUX_VIDEO_OK.get(fmt)
+        if ok_v is not None and vc not in ok_v:
+            return (f"'{vc}' cannot be copied into '{ext}' losslessly - "
+                    "use convert (remux never re-encodes)")
+        ok_a = AUDIO_OK_BY_FORMAT.get(fmt)
+        if ok_a is not None:
+            bad = sorted({(s.get("codec_name") or "").lower()
+                          for s in probe.audio_streams(Path(src))} - ok_a - {""})
+            if bad:
+                return (f"audio {bad} cannot be copied into '{ext}' losslessly - "
+                        "use convert (remux never re-encodes)")
+        return ""
+
+    def first_frame(self, src: Path | str) -> Path | None:
+        """Extract the first frame as a PNG for the preview; None when not
+        measurable (F3: no ffmpeg, no video stream, decode error - the UI
+        then shows 'preview unavailable', never a made-up picture).
+
+        Each call replaces the previous preview file in place: no leak.
+        """
+        import tempfile
+        from ..engines.base import run_command
+        from ..probe.engines import EngineManager
+        src = Path(src)
+        ffmpeg = EngineManager().path("ffmpeg")
+        if ffmpeg is None or not src.is_file():
+            return None
+        td = self._preview_dir or Path(tempfile.mkdtemp(prefix="transmute-prev-"))
+        out = td / "frame.png"
+        res = run_command([ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+                           "-i", src, "-frames:v", "1", "-y", out], timeout_s=60)
+        if not res.ok or not out.is_file() or out.stat().st_size == 0:
+            return None
+        self._preview_dir = td
+        return out
 
     def options_for(self, category: str, target: str,
                     *, quality: int | None = None,
                     encoder: str | None = None,
-                    deep_pdf: bool = False) -> dict[str, Any]:
+                    deep_pdf: bool = False,
+                    remux: bool = False,
+                    tonemap: bool = False,
+                    audio_replace: bool = False,
+                    crf: int | None = None,
+                    size_mb: float | None = None) -> dict[str, Any]:
+        # Remux is a different operation, not a codec choice: no codec/encoder
+        # keys ride along (F2 - the engine refuses to mix the two).
+        if category == "video" and remux:
+            return {"remux": True}
         opts: dict[str, Any] = {}
         if category in ("video", "audio"):
             opts["codec"] = target
             if encoder:
                 opts["encoder"] = encoder
+        if category == "video":
+            if tonemap:
+                opts["tonemap"] = True
+            if audio_replace:
+                opts["audio"] = "replace"
+            if crf is not None and size_mb is not None:
+                raise ValueError("choose CRF or a size target, not both")
+            if size_mb is not None:
+                opts["size_mb"] = float(size_mb)
+            elif crf is not None:
+                opts["crf"] = int(crf)
         if category == "image" and quality is not None:
             opts["quality"] = int(quality)
         if category == "pdf" and deep_pdf:
@@ -183,8 +278,10 @@ class ConverterController:
         return opts
 
     def enqueue(self, src: Path | str, dst_dir: Path | str, category: str,
-                target: str, **kw: Any) -> JobInfo:
-        dst = self.dst_for(src, category, target, dst_dir)
+                target: str, *, ext: str | None = None, **kw: Any) -> JobInfo:
+        # `ext` is the GUI's container override (remux picker); conversion
+        # options never see it - it only chooses the output suffix.
+        dst = self.dst_for(src, category, target, dst_dir, ext=ext)
         rec = self.queue.add(Path(src), dst, category=category,
                              options=self.options_for(category, target, **kw))
         return self._info(rec)

@@ -80,6 +80,82 @@ What P2 shows (tested, not claimed):
 - GUI is an optional extra (`pip install transmute[gui]`); without PySide6
   only the widget tests skip — headless core untouched.
 
+## P3 gate evidence (video depth; commands from repo root)
+
+```
+$ TRANSMUTE_DISABLE_GPU=1 TRANSMUTE_ROOT=$PWD/.smoke-p3 .venv/bin/python -m pytest -q tests/test_video_p3.py
+10 passed in 19.46s                   # e2e, real ffmpeg: remux bitstream-hash
+                                      # proof, HDR tone-map executed, size
+                                      # two-pass + VBV correction, audio
+                                      # replace, bad-audio copy-video path
+
+$ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q tests/test_gui_p3.py tests/test_queue.py
+19 passed in 1.14s                    # controller-level P3 doctrine: remux
+                                      # refuses non-copy codecs by name,
+                                      # CRF-vs-size exclusivity, tonemap gate
+
+$ QT_QPA_PLATFORM=offscreen TRANSMUTE_ROOT=$PWD/.smoke-w .venv/bin/python -m pytest -q tests/test_gui_widgets.py
+19 passed in 0.67s                    # P2's 10 + 9 new widget tests (remux
+                                      # toggle, machine verdict line, tonemap
+                                      # greyed-with-reason, radios, preview)
+
+$ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q tests/test_gui_p3.py tests/test_gui_controller.py tests/test_gui_probe_boot.py tests/test_queue.py
+34 passed in 10.97s                   # GUI tier regression
+
+$ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q tests/
+91 passed in 37.78s                   # full suite, every tier, exit 0
+
+$ TRANSMUTE_ROOT=$PWD/.smoke-rgb TRANSMUTE_DISABLE_GPU=1 .venv/bin/python .dsh-staging/diag_rgb.py
+# (diag script is scratch, not committed; the same assertions are pinned by
+#  tests/test_probe_parse.py::test_rgb_only_is_measured_from_pix_fmts_not_names
+#  and ::test_rgb_only_encoder_never_wins_auto_pick)
+RGB-only encoders measured on this box: 43 (incl. libx264rgb=True)
+libx264: fps=869 rgb=False
+libx264rgb: fps=976 rgb=True
+auto-pick h264 -> libx264
+RGB-DISQUALIFICATION OK               # rgb_output is MEASURED per encoder
+
+$ TRANSMUTE_ROOT=$PWD/.smoke-boot QT_QPA_PLATFORM=offscreen timeout -s KILL 40 .venv/bin/python -m transmute.gui
+This plugin does not support propagateSizeHints()
+exit=137                              # healthy event loop, killed by timeout
+```
+
+What P3 actually delivers (tested, not claimed):
+
+- **Remux (F2)** is `-map 0 -c copy` only — never re-encodes. Proof: both
+  video bitstreams extracted from source and output via raw muxers and
+  sha256-compared; `remux_proof="bitstream-hash"` recorded in the journal
+  (fallback `"packet-manifest"` when a raw muxer is absent). Containers
+  checked against an explicit table; an impossible copy fails fast with the
+  machine's named reason ("'vp9' cannot be copied into '.mp4' losslessly"),
+  and the GUI shows that verdict on the picker **before** enqueueing.
+- **Audio policy**: same-codec skip is refused when audio is `bad_audio`
+  (F20); the video stream still rides `-c:v copy` while only audio
+  transcodes (`audio="replace"` → AAC 160k). `remux=True, audio="replace"`
+  fails fast — "remux never re-encodes audio".
+- **Size target**: two-pass x264/x265 first; if the result exceeds 1.10×
+  target, ONE pass-2 re-run under a VBV ceiling (`-maxrate =v_bps
+  -bufsize 2*v_bps`, target bitrate ×0.92). Measured on a 6 s noise clip at
+  0.75 MB: plain pass-2 140.6%, bitrate-only correction 123.2%, VBV-capped
+  **109.6% (822,221 B)** — chosen. `size_note` records `vbv_correction`,
+  `achieved_bytes`, `within_budget`; over-budget says "content is too
+  complex for this budget - consider a smaller frame size". Non-x264/265
+  encoders get the same intent labelled **approximate** in the GUI tooltip.
+- **HDR tone-map (F15)**: never silent. The GUI's tone-map checkbox exists
+  only if the probe actually executed the full zscale+tonemap chain on an
+  HDR-tagged ≥10-bit PQ sample (`tonemap_chain` in the matrix); otherwise
+  greyed with "this ffmpeg lacks the zscale+tonemap chain (probed)". HDR
+  notice now names the real option the machine has.
+- **RGB-encoder disqualification** (found via tone-map): auto-pick dropped
+  the verified-fastest `libx264rgb` and produced RGB-space h264 no hardware
+  player decodes. Disqualifier is a measured output property (`rgb_output`:
+  ffmpeg lists only RGB pixel formats for that encoder), applied to
+  auto-pick only — explicit user choice stays honoured. Deliberately NOT
+  compat-flag-based: libx264/libx265/libopenh264 are all ℹ️ compat too.
+- **First-frame preview (F13 partial)**: one still via `ffmpeg
+  -frames:v 1` into a temp dir; un-decodable input says "preview
+  unavailable" — measured as unmeasurable, never a invented picture (F3).
+
 ## What P1 actually proves (measured, not claimed)
 
 - **Capability probe** parses 226 encoders from real ffmpeg, trial-encodes
@@ -97,6 +173,36 @@ What P2 shows (tested, not claimed):
 - **Governor load test**: 32 ffmpeg hammers, CPU feedback loop, measured
   window mean ≤85% (observed ~55% with cap 80 — sawtooth stops more than
   needed), ≥1 child stopped at peak, all children resume/exit cleanly.
+
+## Bugs found & fixed during P3 (kept as regression tests)
+
+- Auto-pick chose the verified-**fastest** encoder `libx264rgb` → RGB-space
+  h264 that hardware players choke on. First fix attempt used the ℹ️ compat
+  flag — wrong (libx264/libx265 are compat too; it would ban normal use).
+  Correct disqualifier: probe-**measured** `rgb_output` (ffmpeg lists only
+  RGB pixel formats for that encoder); explicit user choice stays honoured.
+  Pinned by `test_probe_parse.py::test_rgb_only_encoder_never_wins_auto_pick`
+  + `::test_rgb_only_is_measured_from_pix_fmts_not_names`.
+- Size target overshoot: plain two-pass = 140.6% of budget; one bitrate-only
+  re-run still 123.2% (encoder can't go slower than its qmin floor). Real
+  ceiling is VBV (`-maxrate`/`-bufsize` at the budget rate) → measured
+  **109.6% (822,221 B vs a 750,000 B budget)**; `size_note` records the
+  correction and says so honestly when content still busts the budget.
+- GUI **modal `QMessageBox`** froze the whole offscreen test tier (a status
+  popup no offscreen clicker can dismiss). All three became non-blocking
+  `lbl_status` messages — better UX anyway; P2's tests never clicked that
+  path, so the modal sat there unnoticed.
+- Two wiring bugs caught pre-commit by the new widget tests: (a) untoggling
+  remux left the codec combo disabled — F3 says only per-ITEM greying is
+  honest, the combo itself must re-enable; (b) `_run` sent `{"codec": …}`
+  where the controller contract demands `{"remux": True}` alone.
+- `/tmp` is not persistent between sandbox tool calls — suite logs must be
+  written inside the workspace (hit once; rerun wrote `.suite-full.log`).
+- My own new signal test flaked under full-suite load: a fixed
+  `QTest.qWait(400)` passed idle but failed while e2e encodes hogged the CPU
+  — the queued `run_done` signal can be delivered while the worker thread is
+  still retiring, so `is_alive()` was racing. Test now polls the condition
+  with a 10 s deadline; full suite green after (91 passed).
 
 ## Bugs found & fixed during P2 (kept as regression tests)
 
@@ -139,17 +245,23 @@ What P2 shows (tested, not claimed):
 ## Honest gaps (by design, tracked in ROADMAP)
 
 - GUI verified **offscreen only** (no display in this sandbox); no
-  interactive X11/Wayland session has been exercised. Per-byte job progress
-  and per-preset previews are P3/P7 work — today progress ticks per job.
+  interactive X11/Wayland session has been exercised. First-frame previews
+  shipped in P3; progress still ticks per job — byte-level progress is P7.
 - Windows governor = declared stubs (`status()["windows_job_object"]`
   reports the state); real Job Object control is P6.
 - qpdf/pandoc real-engine paths untested on this bench (tools absent) —
   simulated here, real CI matrix in P5.
 - Deep PDF (ghostscript) is lossy — only on explicit opt-in, and the GUI
   checkbox is labelled "Deep PDF pass (LOSSY recompress)" (P2 ✅).
-- F2 remux, F24 watch folders, packaging, LICENSES.md: P3/P4/P8. LICENSES.md
+- F24 watch folders, packaging, LICENSES.md: P4/P8. LICENSES.md
   will be compiled from fetched license files only (P8) — nothing is
   bundled yet, so there is nothing to honestly document today.
+- Edge gap (documented, deliberately unfixed): a machine where ffmpeg exists
+  but **zero video encoders verify** has no video targets in the GUI matrix,
+  so remux is unreachable through the GUI even though remux itself needs no
+  encoder. The engine API path is e2e-proven either way; a dedicated "copy
+  streams only" GUI affordance belongs with P5/P7 GUI polish, not silently
+  bolted on now.
 
 ## Dev notes
 

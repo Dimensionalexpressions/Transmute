@@ -158,3 +158,82 @@ def test_probe_pillow_is_measured_not_assumed():
     buf = io.BytesIO()
     Image.new("RGB", (2, 2)).save(buf, format="JPEG")
     assert (buf.tell() > 0) == feats["jpg"]
+
+
+FFMPEG9_FILTER_LIST = """Filters:
+  Supported filters:
+  The following placeholders are supported ...
+ ... aresample           A->A       Resample audio data.
+ .S tonemap           V->V       Conversion to/from different dynamic ranges.
+ .. tonemap_opencl    V->V       Perform HDR to SDR conversion with tonemapping.
+ .S zscale            V->V       Apply resizing, colorspace and bit depth conversion.
+"""
+
+
+def test_filter_probe_handles_narrow_flag_columns_and_trials_chain(tmp_path, monkeypatch):
+    """Regression (P3): ffmpeg 9 prints a 2-char flag column; a fixed 6-char
+    regex silently reported zscale/tonemap missing on a libzimg build.
+    Listing is necessary but NOT sufficient: the chain must trial-run."""
+    from pathlib import Path
+    from transmute.probe import capability as cap_mod
+
+    class FakeRes:
+        stdout = FFMPEG9_FILTER_LIST
+
+    monkeypatch.setattr(cap_mod, "run_command", lambda *a, **k: FakeRes())
+    calls: list = []
+    monkeypatch.setattr(cap_mod, "_run_tonemap_trial",
+                        lambda f: calls.append(f) or True)
+    got = cap_mod._probe_ffmpeg_filters(Path("/fake/ffmpeg"))
+    assert got == {"zscale": True, "tonemap": True, "tonemap_chain": True}
+    assert calls == [Path("/fake/ffmpeg")]
+    # listed but chain trial fails (e.g. libzimg-less): must report False
+    monkeypatch.setattr(cap_mod, "_run_tonemap_trial", lambda f: False)
+    assert cap_mod._probe_ffmpeg_filters(Path("/fake/ffmpeg"))["tonemap_chain"] is False
+
+
+# ------------------------------------------- RGB-only encoder gate (P3 bug)
+
+def test_rgb_only_is_measured_from_pix_fmts_not_names():
+    from transmute.probe.capability import rgb_only
+    # libx264rgb shape: ffmpeg lists ONLY RGB formats for it -> True
+    assert rgb_only(["gbrp", "gbrp10le", "bgr0", "rgb24"]) is True
+    # libx264 shape: YUV formats present -> False even if RGB formats ride along
+    assert rgb_only(["yuv420p", "gbrp", "yuv420p10le"]) is False
+    # empty/unknown list: claim nothing (F3: no invented facts)
+    assert rgb_only([]) is False
+
+
+class _Rep:
+    """Duck-typed CapabilityReport: pick_encoder needs only these members."""
+
+    def __init__(self, caps):
+        self.encoders = caps
+
+    def verified_encoders(self, codec):  # same semantics as the real report
+        got = [e for e in self.encoders if e.verified and e.codec == codec]
+        return sorted(got, key=lambda e: -(e.fps or 0))
+
+
+def _h264(name, fps, rgb):
+    from transmute.probe.capability import EncoderCapability
+    return EncoderCapability(name=name, codec="h264", backend="cpu", hw=False,
+                             verified=True, fps=fps, rgb_output=rgb)
+
+
+def test_rgb_only_encoder_never_wins_auto_pick():
+    """The real P3 bug: auto-pick chose the verified-FASTEST libx264rgb and
+    produced RGB-space h264 that hardware players choke on. The disqualifier
+    is the measured rgb_output flag, NOT the ℹ️ compat flag (libx264 is
+    compat too and must still win). Explicit user choice is honoured via a
+    direct lookup in VideoEngine.convert - pick_encoder only serves auto."""
+    from types import SimpleNamespace
+    from transmute.engines.video import VideoEngine
+
+    eng = object.__new__(VideoEngine)
+    rgb_fast, yuv_slower = _h264("libx264rgb", 1000.0, True), _h264("libx264", 800.0, False)
+    eng.prober = SimpleNamespace(report=lambda: _Rep([rgb_fast, yuv_slower]))
+    assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=False).name == "libx264"
+    # honest last resort: RGB-only is ALL this machine verified -> still offer it
+    eng.prober = SimpleNamespace(report=lambda: _Rep([rgb_fast]))
+    assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=False).name == "libx264rgb"

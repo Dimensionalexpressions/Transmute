@@ -192,15 +192,23 @@ class JobQueue:
                        terminal=terminal)
             return
 
-        # ---- verify BEFORE replace (F24): never swap unverified bytes
+        # ---- verify BEFORE replace (F24): never swap unverified bytes.
+        # An engine may self-verify inside convert() and say so via
+        # data["verified_by_engine"] (e.g. tone-mapped output, where the
+        # standard verify would legitimately flag the intended HDR->SDR step).
         self.journal.transition(rec, "verifying")
-        try:
-            vres = engine.verify(src, staged)
-        except Exception as exc:  # noqa: BLE001
-            vres = None
-            vreason = f"verifier crashed: {type(exc).__name__}: {exc}"
+        vreason: str | None = None
+        if (getattr(result, "data", None) or {}).get("verified_by_engine"):
+            self.events.append("verify_self", job_id=rec.job_id,
+                               detail="engine verified output during convert")
         else:
-            vreason = vres.reason if not getattr(vres, "ok", False) else None
+            try:
+                vres = engine.verify(src, staged)
+            except Exception as exc:  # noqa: BLE001
+                vres = None
+                vreason = f"verifier crashed: {type(exc).__name__}: {exc}"
+            else:
+                vreason = vres.reason if not getattr(vres, "ok", False) else None
         if vreason is not None:
             staged.unlink(missing_ok=True)
             self.events.append("verify_failed", job_id=rec.job_id, reason=vreason)

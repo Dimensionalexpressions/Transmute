@@ -125,6 +125,23 @@ def test_verify_failure_preserves_original(tmp_path, fixtures):
     assert not (staged.exists() and list(staged.glob("*")))
 
 
+def test_verified_by_engine_skips_separate_verify(tmp_path, fixtures):
+    # Engine self-verified during convert (tone-map path): queue must NOT run
+    # the standard verify (which would legitimately flag the intended step),
+    # yet the replace still happens atomically.
+    def conv(src, dst):
+        dst.write_bytes(b"TONEMAPPED")
+        return EngineResult(outcome="converted", encoder="fake",
+                            data={"verified_by_engine": True})
+    # verify_ok=False proves the queue never called verify().
+    q = _queue(tmp_path, FakeEngine(convert=conv, verify_ok=False))
+    jid = q.add(fixtures["jpg"], tmp_path / "t.mp4", category="video").job_id
+    s = q.run()
+    assert s.counts.get("replaced") == 1
+    assert (tmp_path / "t.mp4").read_bytes() == b"TONEMAPPED"
+    assert q.journal.records[jid].state == "replaced"
+
+
 def test_crashing_engine_does_not_break_queue(tmp_path, fixtures):
     def conv(src, dst):
         raise RuntimeError("engine bug")

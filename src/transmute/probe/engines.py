@@ -168,13 +168,17 @@ class EngineManager:
     def __init__(self, custom_paths: dict[str, str | os.PathLike] | None = None):
         self.custom_paths = {k: Path(v).expanduser() for k, v in (custom_paths or {}).items()}
         self._cache: dict[str, EngineInfo] = {}
+        # get() populates single entries lazily; that must NOT masquerade as
+        # a complete detect() (partial cache -> KeyError on other engines).
+        self._fully_detected = False
         self._lock = threading.Lock()
 
     # -- public ---------------------------------------------------------
     def detect(self, refresh: bool = False) -> dict[str, EngineInfo]:
         with self._lock:
-            if refresh or not self._cache:
+            if refresh or not self._fully_detected:
                 self._cache = {name: self._detect_one(spec) for name, spec in KNOWN_ENGINES.items()}
+                self._fully_detected = True
             return dict(self._cache)
 
     def get(self, name: str) -> EngineInfo:

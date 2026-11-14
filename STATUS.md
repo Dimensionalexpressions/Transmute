@@ -1,8 +1,9 @@
 # Transmute — STATUS (living handoff)
 
-**State: P1 gate PASSED ✅** — headless core complete, 36/36 tests green on a
-GPU-less sandboxed Linux box (CachyOS bench, 32 cores, no `/dev/dri`, no
-`/dev/nvidia*`). Next: **P2 (PySide6 GUI)** on user "next".
+**State: P2 gate PASSED ✅** — GUI added on top of the P1 core; 61/61 tests
+green on a GPU-less sandboxed Linux box (CachyOS bench, 32 cores, no
+`/dev/dri`, no `/dev/nvidia*`); GUI verified offscreen (no X11 session in
+this sandbox). Next: **P3 (video depth)** on user "next".
 
 Bench quirks reflected in the tests on purpose: qpdf **and** pandoc are not
 installed here (ladder fallbacks proven by simulation), systemd user bus is
@@ -32,6 +33,53 @@ ls: cannot access '/dev/nvidia*': No such file or directory
 No leftover processes after the run (`pgrep -c -x ffmpeg` → 0; governor test
 kills its own process groups in `finally`).
 
+## P2 gate evidence (GUI; commands from repo root)
+
+```
+$ .venv/bin/python -m pytest -q tests/test_gui_controller.py
+14 passed in 0.49s                    # Qt-free controller: targets, reasons, ladder, options, queue e2e
+
+$ .venv/bin/python -m pytest -q tests/test_gui_widgets.py
+10 passed in 0.84s                    # QT_QPA_PLATFORM=offscreen, real QTest clicks, no pytest-qt
+
+$ .venv/bin/python -m pytest -q tests/test_gui_probe_boot.py
+1 passed in 7.61s                     # REAL cold probe through the controller (production boot path)
+
+$ .venv/bin/python -m pytest -q tests/
+61 passed in 32.39s                   # full suite; no Qt warnings at teardown
+
+$ mkdir -p .noqt && echo 'raise ImportError("simulated absent/broken")' > .noqt/PySide6.py
+$ PYTHONPATH=$PWD/.noqt .venv/bin/python -m pytest -q tests/test_gui_widgets.py tests/test_gui_controller.py
+SKIPPED [1] tests/test_gui_widgets.py:21: could not import 'PySide6': simulated absent/broken
+14 passed, 1 skipped in 0.39s         # absent/broken Qt: GUI skips, core+controller unaffected
+
+$ TRANSMUTE_ROOT=$PWD/.smoke-boot QT_QPA_PLATFORM=offscreen timeout -s KILL 40 .venv/bin/python -m transmute.gui
+This plugin does not support propagateSizeHints()   # QWindow realized (offscreen platform)
+exit=137                              # 40 s healthy event loop, killed by timeout; no traceback
+```
+
+Gate deviation (honest): ROADMAP said "GUI smoke via `pytest-qt`" —
+pytest-qt is not on the allowed dependency list, so the same coverage runs
+with a manual `QApplication` + `QTest.qWait` under `QT_QPA_PLATFORM=offscreen`
+in `tests/test_gui_widgets.py`. **No interactive X11/Wayland session was run**
+from this sandbox; window boot is proven offscreen only.
+
+What P2 shows (tested, not claimed):
+
+- Every picker entry traces to a capability-matrix row: unavailable targets
+  stay **visible + greyed with the machine's own reason** as tooltip (F3);
+  compat codecs badged ℹ️, verified ✓; "verify renders" bookkeeping rows
+  never surface.
+- Encoder dropdown = measured ladder, fastest verified first, default
+  "auto (fastest verified)"; hidden and disabled for image/pdf categories.
+- HDR source → tone-map notice before converting (F15); HDR *unknown* (no
+  ffprobe) → honest unknown notice, no invented claim.
+- Worker thread never touches timers: run completion travels via `Signal`
+  (queued connection) — the teardown `killTimer` warnings disappeared and a
+  deterministic `QTest.qWait` test pins it.
+- GUI is an optional extra (`pip install transmute[gui]`); without PySide6
+  only the widget tests skip — headless core untouched.
+
 ## What P1 actually proves (measured, not claimed)
 
 - **Capability probe** parses 226 encoders from real ffmpeg, trial-encodes
@@ -49,6 +97,26 @@ kills its own process groups in `finally`).
 - **Governor load test**: 32 ffmpeg hammers, CPU feedback loop, measured
   window mean ≤85% (observed ~55% with cap 80 — sawtooth stops more than
   needed), ≥1 child stopped at peak, all children resume/exit cleanly.
+
+## Bugs found & fixed during P2 (kept as regression tests)
+
+1. PySide6 arg-order trap: `QListWidgetItem.setData(role, value)` but
+   `QStandardItem.setData(value, role)` — wrong order = TypeError in the
+   target list (comment at the call site guards it).
+2. `QTimer.singleShot` from a worker thread → `QObject::killTimer: Timers
+   cannot be stopped from another thread` at teardown; completion now travels
+   via `Signal` → queued slot on the GUI thread.
+3. **Boot crash that survived the whole unit suite**: controller called
+   `CapabilityProber(paths=...)`, which the prober doesn't accept — every
+   unit test injects a fake report, so only a real boot hit it. Caught by
+   the offscreen boot check; guarded from P2 on by
+   `tests/test_gui_probe_boot.py` (e2e, real cold probe, isolated root).
+4. Image engine left `EngineResult.encoder` empty ("audit trail" gap) — now
+   records `pillow`, matching pdf/document engines; controller e2e asserts a
+   non-empty producer.
+5. `pytest.importorskip("PySide6")` (pytest ≥ 9.1) skips only on
+   `ModuleNotFoundError`, so an installed-but-broken Qt would be a
+   collection error; explicit `exc_type=ImportError` makes both cases skip.
 
 ## Bugs found & fixed during P1 (kept as regression tests)
 
@@ -70,14 +138,15 @@ kills its own process groups in `finally`).
 
 ## Honest gaps (by design, tracked in ROADMAP)
 
-- GUI doesn't exist yet (P2) — core is headless by design; nothing user-
-  facing promises a window.
+- GUI verified **offscreen only** (no display in this sandbox); no
+  interactive X11/Wayland session has been exercised. Per-byte job progress
+  and per-preset previews are P3/P7 work — today progress ticks per job.
 - Windows governor = declared stubs (`status()["windows_job_object"]`
   reports the state); real Job Object control is P6.
 - qpdf/pandoc real-engine paths untested on this bench (tools absent) —
   simulated here, real CI matrix in P5.
-- Deep PDF (ghostscript) is lossy — surfaced only via explicit `deep=True`
-  and must be labelled in the P2 GUI.
+- Deep PDF (ghostscript) is lossy — only on explicit opt-in, and the GUI
+  checkbox is labelled "Deep PDF pass (LOSSY recompress)" (P2 ✅).
 - F2 remux, F24 watch folders, packaging, LICENSES.md: P3/P4/P8. LICENSES.md
   will be compiled from fetched license files only (P8) — nothing is
   bundled yet, so there is nothing to honestly document today.

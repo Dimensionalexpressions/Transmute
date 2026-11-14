@@ -25,3 +25,6 @@ htmlcov/
 portable.ini
 
 .uv-cache/
+
+# harness staging artifacts (not project)
+.dsh-staging/

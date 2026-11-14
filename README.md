@@ -35,10 +35,18 @@ can actually do before it ever offers you an option.
 ```bash
 git clone <this repo> && cd transmute
 uv venv .venv && .venv/bin/python -m pip install -e .   # or: python -m venv .venv
-.venv/bin/python -m pytest -q tests/                    # 36 tests, no GPU needed
+.venv/bin/python -m pip install -e ".[gui]"             # optional: PySide6 desktop GUI
+.venv/bin/python -m pytest -q tests/                    # no GPU needed; GUI tests skip without PySide6
 ```
 
-Core usage (GUI comes in P2; the headless core is fully functional now):
+Desktop GUI (formats are greyed out with **your machine's** reasons, ℹ️ compat
+badges, HDR tone-map notices, measured-ladder encoder picker):
+
+```bash
+.venv/bin/python -m transmute.gui
+```
+
+Headless/core usage (the GUI is a thin layer over exactly this):
 
 ```python
 from transmute import CapabilityProber, JobQueue
@@ -72,6 +80,7 @@ programs.
 - `src/transmute/engines/` — video / audio / image / pdf / document wrappers (never raise)
 - `src/transmute/runner/` — journal-backed queue: staging → verify → replace, retry ladder
 - `src/transmute/governor/` — CPU/IO/GPU self-throttling (Linux real, Windows stub)
+- `src/transmute/gui/` — Qt shell; `controller.py` holds every decision and is Qt-free
 - `SPEC.md` / `ROADMAP.md` / `STATUS.md` — what it must do, what it will do, where we are
 
 ## Licensing

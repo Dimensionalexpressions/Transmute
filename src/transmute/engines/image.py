@@ -124,6 +124,10 @@ class ImageEngine:
                                 seconds=time.monotonic() - t0)
         res.seconds = time.monotonic() - t0
 
+        if res.outcome == "converted":
+            # the in-process producer belongs in the audit trail, same as the
+            # external engines record theirs (queue journals rec.encoder)
+            res.encoder = "pillow"
         if res.outcome != "converted":
             return res
         # size discipline: keep the original unless real savings (never grow files)

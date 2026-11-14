@@ -278,3 +278,55 @@ class TestP3VideoControls:
         monkeypatch.setattr(window.ctrl, "first_frame", lambda src: None)
         window._preview()
         assert "preview unavailable" in window.lbl_prev.text()
+
+
+class TestQueueControlsP5:
+    """Pause/Resume/Cancel-pending buttons on a REAL JobQueue: buttons are
+    pure wiring; the doctrine (recoverable vs terminal, in-flight untouched)
+    is proven in test_pause_cancel.py at the queue level."""
+
+    @pytest.fixture
+    def qwin(self, qapp, tmp_path, fixtures):
+        from transmute.gui.app import MainWindow
+        from transmute.jsonl import JsonlWriter
+        from transmute.runner import JobQueue, Journal
+        from test_gui_controller import _report
+        jq = JobQueue(journal=Journal(tmp_path / "journal.jsonl"),
+                      events=JsonlWriter(tmp_path / "events.jsonl"),
+                      logs_root=tmp_path / "captures",
+                      engine_get=lambda cat: None)
+        ctrl = ConverterController(report_provider=_report, queue=jq)
+        ctrl._report = _report()
+        win = MainWindow(controller=ctrl)
+        for n in ("a", "b"):
+            jq.add(fixtures["jpg"], tmp_path / "out" / f"{n}.webp",
+                   category="image")
+        yield win, jq
+        win.close()
+
+    def test_pause_button_parks_jobs_and_flips_controls(self, qwin):
+        win, jq = qwin
+        win.btn_pause.click()
+        assert all(r.state == "paused" for r in jq.journal.records.values())
+        assert win.btn_resume.isEnabled() and not win.btn_pause.isEnabled()
+        assert "Paused 2" in win.lbl_status.text()
+        assert not jq.journal.pending()          # nothing auto-resumes itself
+
+    def test_resume_button_restores_and_rearms(self, qwin):
+        win, jq = qwin
+        win.btn_pause.click()
+        win.btn_resume.click()
+        assert all(r.state == "queued" for r in jq.journal.records.values())
+        assert win.btn_pause.isEnabled() and not win.btn_resume.isEnabled()
+        assert "Resumed 2" in win.lbl_status.text()
+
+    def test_cancel_button_abandons_with_visible_reason(self, qwin):
+        win, jq = qwin
+        win.btn_cancel.click()
+        rows = [(r.state, r.reason) for r in jq.journal.records.values()]
+        assert all(s == "abandoned" and "cancelled by user" in rs
+                   for s, rs in rows)
+        # the table actually shows it — cancel must never be silent
+        assert win.table.rowCount() == 2
+        assert all(win.table.item(i, 2).text() == "abandoned" for i in range(2))
+        assert "Cancelled 2" in win.lbl_status.text()

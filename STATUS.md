@@ -196,6 +196,72 @@ The journal landing under `$TRANSMUTE_ROOT/state/` with the mirrored
 destination (`out/sub/…`) is the F24+F25 proof: queue-only doctrine (the CLI
 never converts), portable-mode honored, tree mirroring on by default.
 
+## P5 gate evidence (robustness & breadth; commands from repo root)
+
+Gate: "CI green on ≥2 ffmpeg flavours; soak report." The soak is PROVEN
+below. The CI workflow is written and locally sanity-checked, but this
+repo has no git remote yet and the bench has no network/`gh`, so the
+matrix itself has not RUN anywhere — awaiting a GitHub repo (owner
+decision). This is stated, not hidden.
+
+- **Full suite**: `TRANSMUTE_ROOT=$PWD/.gui-live .venv/bin/python -m pytest -q`
+  → `121 passed, 3 skipped in 56.73s`. The 3 skips are honest, not
+  hidden: `tests/test_real_external_engines.py` needs qpdf/pandoc, which
+  are genuinely absent on this Arch bench — `-rs` prints
+  "qpdf not on this machine (CI installs it)" ×2 and
+  "pandoc not on this machine (CI installs it)" ×1.
+- **Real-engine coverage** (`tests/test_real_external_engines.py`):
+  qpdf compress → pikepdf page-parity → pixel verify via the production
+  `PdfEngine._run`/`verify` path; pandoc markdown→PDF via the production
+  `_via_pandoc` writer path incl. `pandoc+{writer}` encoder attribution.
+  On CI these RUN (both flavours install qpdf + pandoc + LaTeX), and a
+  final step FAILS the job if any test in that file reports a skip —
+  skips are only tolerated on machines we don't control the packages of.
+- **CI matrix** (`.github/workflows/ci.yml`): 2 ffmpeg flavours,
+  fail-fast false — `distro` (Ubuntu apt ffmpeg: 6.x-era build) vs
+  `static-7.1` (BtbN pinned release-archive build, tag `FFmpeg-n7.1.1`,
+  asset glob because asset names embed build hashes). Both run
+  `-m "not slow"` + the real-engine file. `QT_QPA_PLATFORM=offscreen`
+  for the PySide6 tests. Caveat: with no remote yet, this YAML has only
+  been structure-checked (no actionlint, no network to verify BtbN asset
+  naming); the first Actions run is its real validation.
+- **Long-file soak PASS**: `scripts/soak.py` drives the REAL production
+  `JobQueue` + engines over 4×240 s 720p clips through `libaom-av1`
+  (deliberately slow reference encoder), h264, opus, webp and a PDF
+  no-op; a psutil watcher samples RSS/fds/threads every 5 s;
+  `pause_all` at +45 s and `resume_all` at +105 s fire MID-drain.
+    - command: `TRANSMUTE_ROOT=$PWD/.gui-live .venv/bin/python scripts/soak.py --minutes 8 --clip-seconds 240 --work /tmp/transmute-soak --report docs/reports/soak-2026-11-14.md` → exit 0
+    - captured (docs/reports/soak-2026-11-14.md): wall **277.1 min**,
+      20 jobs, **samples=3326**; RESULT PASS; RSS 75→27 MiB (growth
+      after warm-up **−42.7 MiB**, peak 149); fds 4→4 (peak 12);
+      threads 1→1 (peak 6); staging leftovers **none**; after drain
+      every record terminal (19 replaced, 1 kept — the PDF "already
+      optimal" honest no-op); pulses: `pause_all -> 13 paused at +45s`,
+      `resume_all -> 13 resumed at +105s` and all 13 ran afterwards.
+    - The dry-run that preceded it caught a REAL product bug (two
+      workers, one shared `.json.tmp` cache name) — see the P5 bugs
+      section; the 4.6 h run then passed clean.
+- **Pause/resume/cancel semantics** (unit-proven, `tests/test_pause_cancel.py`,
+  7 tests): `pause_all`/`resume_all` are a RECOVERABLE pair — records go
+  to a `paused` state remembering `paused_from` (incl. each failed job's
+  retry schedule) and survive a journal reload; in-flight `running` jobs
+  are never interrupted (proven with a gated worker). `cancel_all` is
+  TERMINAL: `abandoned` with reason "cancelled by user", and leaves
+  `running`/`verifying` alone — you cancel the queue, not a half-written
+  file.
+- **Disk-space preflight** (`src/transmute/runner/preflight.py`): measured
+  `shutil.disk_usage` floor check (128 MiB min, ×1.15 slack when a
+  `size_mb` target exists); shortage → transient `failed` with the
+  machine's own numbers in the reason ("need >= X MiB free, measured Y");
+  an UNMEASURABLE probe (OSError) never blocks work — we measure, and if
+  measuring is impossible we proceed honestly. Proven via monkeypatched
+  disk-full and OSError paths, incl. "no staging file was left behind".
+- **GUI wiring** (`tests/test_gui_widgets.py`, +3 tests over a real
+  `JobQueue`): Pause / Resume / "Cancel pending" buttons drive exactly
+  the queue methods above; Resume disabled until something is paused;
+  status line states what will still finish ("any job already running
+  will finish").
+
 ## What P1 actually proves (measured, not claimed)
 
 - **Capability probe** parses 226 encoders from real ffmpeg, trial-encodes
@@ -213,6 +279,21 @@ never converts), portable-mode honored, tree mirroring on by default.
 - **Governor load test**: 32 ffmpeg hammers, CPU feedback loop, measured
   window mean ≤85% (observed ~55% with cap 80 — sawtooth stops more than
   needed), ≥1 child stopped at peak, all children resume/exit cleanly.
+
+## Bugs found & fixed during P5 (kept as regression tests)
+
+- **Capability-cache write race** (found by the soak dry-run, not by any
+  unit test): two concurrent video jobs probed the same capability key and
+  both wrote the cache under one shared `.json.tmp` name; the loser of
+  `os.replace(tmp, final)` then crashed with `FileNotFoundError` because
+  the winner had already moved that exact tmp away — two real jobs died
+  "engine crashed: FileNotFoundError" with a transient-failure backoff.
+  Fix: `CapabilityCache.save` uses `tempfile.mkstemp` (unique name per
+  save), tolerates losing the replace (content is equivalent), and never
+  leaks a tmp on any error path. Locked by
+  `test_capability_cache_concurrent_save_no_race` (8 threads × 30 saves of
+  the same key; asserts no exception, final file present, no `*.tmp`
+  residue). Verify: `python -m pytest -q tests/test_probe_parse.py -k cache`.
 
 ## Bugs found & fixed during P4 (kept as regression tests)
 

@@ -237,3 +237,36 @@ def test_rgb_only_encoder_never_wins_auto_pick():
     # honest last resort: RGB-only is ALL this machine verified -> still offer it
     eng.prober = SimpleNamespace(report=lambda: _Rep([rgb_fast]))
     assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=False).name == "libx264rgb"
+
+
+def test_capability_cache_concurrent_save_no_race(tmp_path):
+    """P5 soak regression: 8 threads saving the SAME probe key must never
+    raise. The old shared '.json.tmp' name made the loser of os.replace hit
+    FileNotFoundError (two video jobs lost the engine that way in the soak).
+    """
+    import threading
+    from transmute.probe.capability import CapabilityCache, CapabilityReport
+
+    rep = CapabilityReport(schema=1, probe_key="k", generated_at=0.0,
+                           app_version="test", machine={}, engines={},
+                           encoders=[], filters={}, gpu_nodes={},
+                           image_backends={}, pdf_backends={}, caveats=[],
+                           matrix=[])
+    cache = CapabilityCache(tmp_path)
+    errs: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(30):
+                cache.save(rep)
+        except BaseException as exc:  # noqa: BLE001 - the test collects these
+            errs.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errs, f"concurrent cache save raised: {errs!r}"
+    assert (tmp_path / "k.json").is_file()
+    assert not list(tmp_path.glob("*.tmp")), "temp file leaked"

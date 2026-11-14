@@ -16,7 +16,7 @@ from typing import Any
 from ..jsonl import JsonlWriter, read_jsonl
 
 STATES = ("queued", "running", "verifying", "replaced", "kept", "skipped",
-          "failed", "interrupted", "abandoned")
+          "failed", "interrupted", "abandoned", "paused")
 TERMINAL = {"replaced", "kept", "skipped", "abandoned"}
 
 
@@ -33,6 +33,7 @@ class JournalRecord:
     reason: str | None = None
     encoder: str | None = None
     src_fp: dict[str, Any] | None = None  # size+mtime: idempotence fingerprint
+    paused_from: str | None = None  # state to restore on resume_all()
     updated: float = 0.0
 
     @property
@@ -52,7 +53,8 @@ class JournalRecord:
              "category": self.category, "options": self.options, "state": self.state,
              "attempts": self.attempts, "next_attempt_at": self.next_attempt_at,
              "reason": self.reason, "encoder": self.encoder,
-             "src_fp": self.src_fp, "updated": self.updated}
+             "src_fp": self.src_fp, "paused_from": self.paused_from,
+             "updated": self.updated}
         return {k: v for k, v in d.items() if v is not None}
 
 
@@ -84,6 +86,7 @@ class Journal:
                 next_attempt_at=rec.get("next_attempt_at"),
                 reason=rec.get("reason"), encoder=rec.get("encoder"),
                 src_fp=rec.get("src_fp"),
+                paused_from=rec.get("paused_from"),
                 updated=float(rec.get("ts") or 0.0))
         return self.records
 

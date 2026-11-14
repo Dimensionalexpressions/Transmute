@@ -289,6 +289,18 @@ class ConverterController:
     def process(self, *, max_workers: int = 2) -> Any:
         return self.queue.run(max_workers=max_workers)
 
+    # Queue-wide controls (P5). The semantics live in JobQueue (single
+    # source of truth): pause/resume is the recoverable pair, cancel is the
+    # terminal one; in-flight jobs always finish their verify-before-replace.
+    def pause_queue(self) -> int:
+        return self.queue.pause_all()
+
+    def resume_queue(self) -> int:
+        return self.queue.resume_all()
+
+    def cancel_pending(self) -> int:
+        return self.queue.cancel_all()
+
     def snapshot(self) -> list[JobInfo]:
         return [self._info(r) for r in self.queue.journal.records.values()]
 

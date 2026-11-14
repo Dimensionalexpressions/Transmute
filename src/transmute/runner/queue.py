@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from ..jsonl import JsonlWriter
 from ..paths import AppPaths, paths as app_paths
+from . import preflight
 from .journal import Journal, JournalRecord
 
 # F23 retry ladder: transient failures get 10 min, 1 h, 24 h before the next
@@ -75,6 +76,7 @@ class JobQueue:
             engine_get = engine_for
         self._engine_get = engine_get
         self._stop = threading.Event()
+        self._paused = threading.Event()
 
     # ------------------------------------------------------------- enqueue
     def add(self, src: Path, dst: Path, *, category: str | None = None,
@@ -130,9 +132,60 @@ class JobQueue:
                 n += 1
         return n
 
+    # ------------------------------------------------- pause / resume / cancel (P5)
+    PAUSABLE = ("queued", "failed", "interrupted")
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused.is_set()
+
+    def pause_all(self) -> int:
+        """Recoverable stop for everything not in flight: running/verifying
+        jobs FINISH (verify-before-replace is never interrupted); queued and
+        retry-pending jobs move to 'paused' remembering where to come back."""
+        self._paused.set()
+        n = 0
+        for rec in list(self.journal.records.values()):
+            if rec.state in self.PAUSABLE:
+                self.journal.transition(rec, "paused", paused_from=rec.state,
+                                        reason="paused by user")
+                n += 1
+        self.events.append("queue_paused", paused=n)
+        return n
+
+    def resume_all(self) -> int:
+        """Undo pause_all(): each job returns to its remembered state
+        (a paused 'failed' keeps its retry schedule; others requeue now)."""
+        self._paused.clear()
+        n = 0
+        for rec in list(self.journal.records.values()):
+            if rec.state == "paused":
+                back = rec.paused_from if rec.paused_from in self.PAUSABLE else "queued"
+                self.journal.transition(rec, back, paused_from=None, reason=None)
+                n += 1
+        self.events.append("queue_resumed", resumed=n)
+        return n
+
+    def cancel_all(self) -> int:
+        """Terminal cancel for everything not in flight (visible 'abandoned'
+        with a reason — never silent). In-flight running/verifying jobs
+        finish; their output passes verify-before-replace as always."""
+        n = 0
+        for rec in list(self.journal.records.values()):
+            if not rec.terminal and rec.state not in ("running", "verifying"):
+                self.journal.transition(rec, "abandoned", reason="cancelled by user",
+                                        next_attempt_at=None)
+                self.events.append("job_cancelled", job_id=rec.job_id)
+                n += 1
+        self.events.append("queue_cancelled", cancelled=n)
+        return n
+
     # ------------------------------------------------------------- per-job
     def _process(self, rec: JournalRecord, summary: RunSummary) -> None:
-        if self._stop.is_set():
+        # skip unless still startable: stop/pause flags OR a state that a
+        # concurrent pause/cancel already moved out from under this future
+        if (self._stop.is_set() or self._paused.is_set()
+                or rec.state not in self.PAUSABLE):
             return
         src, dst = Path(rec.src), Path(rec.dst)
         self.journal.transition(rec, "running", attempts=rec.attempts)
@@ -151,6 +204,17 @@ class JobQueue:
                               + (f" | install: {(avail.guidance or {}).get('linux', '')}"
                                  if avail.guidance else ""),
                        terminal=True)
+            return
+
+        # Disk preflight (P5): measure the destination volume BEFORE writing;
+        # an unmeasurable probe never blocks work (see runner/preflight.py).
+        try:
+            src_size = src.stat().st_size
+        except OSError:
+            src_size = 0  # engine reports its own source error; floor applies
+        short = preflight.shortage(dst.parent, src_size, rec.options)
+        if short is not None:
+            self._fail(rec, summary, reason=preflight.reason_for(short))
             return
 
         staged = self._staged_path(dst, rec.job_id)

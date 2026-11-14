@@ -174,11 +174,26 @@ class MainWindow(QMainWindow):
         ctl = QHBoxLayout()
         self.btn_run = QPushButton("Run queue")
         self.btn_run.clicked.connect(self._run)
+        # P5: recoverable pause vs terminal cancel are DIFFERENT buttons —
+        # never let one word mean both. In-flight jobs finish either way.
+        self.btn_pause = QPushButton("Pause")
+        self.btn_pause.clicked.connect(self._pause)
+        self.btn_resume = QPushButton("Resume")
+        self.btn_resume.clicked.connect(self._resume)
+        self.btn_resume.setEnabled(False)
+        self.btn_cancel = QPushButton("Cancel pending")
+        self.btn_cancel.setToolTip(
+            "Abandon everything not yet started (visible in the table as\n"
+            "'cancelled by user'). Jobs already running finish normally.")
+        self.btn_cancel.clicked.connect(self._cancel_pending)
         self.bar = QProgressBar()
         self.bar.setRange(0, 0)
         self.bar.setVisible(False)
         self.lbl_status = QLabel("")
         ctl.addWidget(self.btn_run)
+        ctl.addWidget(self.btn_pause)
+        ctl.addWidget(self.btn_resume)
+        ctl.addWidget(self.btn_cancel)
         ctl.addWidget(self.bar)
         ctl.addWidget(self.lbl_status, stretch=1)
         bv.addLayout(ctl)
@@ -471,6 +486,29 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 3, QTableWidgetItem(detail))
         self.lbl_status.setText(
             f"{done}/{len(rows)} settled" if rows else "queue empty")
+
+    # ------------------------------------------------- pause/resume/cancel
+    def _pause(self) -> None:
+        n = self.ctrl.pause_queue()
+        self.btn_pause.setEnabled(False)
+        self.btn_resume.setEnabled(True)
+        self.refresh_queue()
+        self.lbl_status.setText(
+            f"Paused {n} pending job(s) — any job already running will finish.")
+
+    def _resume(self) -> None:
+        n = self.ctrl.resume_queue()
+        self.btn_pause.setEnabled(True)
+        self.btn_resume.setEnabled(False)
+        self.refresh_queue()
+        self.lbl_status.setText(f"Resumed {n} job(s).")
+
+    def _cancel_pending(self) -> None:
+        n = self.ctrl.cancel_pending()
+        self.refresh_queue()
+        self.lbl_status.setText(
+            f"Cancelled {n} job(s) (shown as cancelled by user) — in-flight "
+            f"jobs still finish.")
 
     # ------------------------------------------------------------- drops
     def dropEvent(self, event):  # noqa: N802

@@ -26,6 +26,7 @@ import os
 import platform
 import re
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -650,10 +651,21 @@ class CapabilityCache:
     def save(self, rep: CapabilityReport) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
         p = self.root / f"{rep.probe_key}.json"
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rep.to_dict(), ensure_ascii=False, indent=1),
-                       encoding="utf-8")
-        os.replace(tmp, p)
+        # Unique tmp per save: queue workers may cache the same probe key
+        # concurrently, and one shared ".json.tmp" name makes the loser of
+        # os.replace crash on the winner's gone tmp (P5 soak caught this).
+        fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".json.tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(rep.to_dict(), fh, ensure_ascii=False, indent=1)
+            try:
+                os.replace(tmp, p)
+            except FileNotFoundError:
+                pass  # another writer won the race - its content is equivalent
+        except OSError:
+            pass  # cache save is best-effort; the report lives in memory anyway
+        finally:
+            Path(tmp).unlink(missing_ok=True)
         return p
 
     def load(self, key: str) -> CapabilityReport | None:

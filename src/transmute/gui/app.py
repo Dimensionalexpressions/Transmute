@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
         # right: what this machine can do, chosen from the probed matrix
         right = QGroupBox("Convert to (from this machine's capability report)")
         rv = QFormLayout(right)
+        self._form = rv
         self.cat_box = QComboBox()
         self.cat_box.addItems(self.ctrl.categories())
         self.cat_box.currentTextChanged.connect(self._load_targets)
@@ -142,7 +143,9 @@ class MainWindow(QMainWindow):
         self.tgt_box.currentIndexChanged.connect(self._load_encoders)
         rv.addRow("Target", self.tgt_box)
         self.enc_box = QComboBox()
-        self.enc_box.currentIndexChanged.connect(lambda *_: self._update_enc_note())
+        self.enc_box.currentIndexChanged.connect(
+            lambda *_: (self._update_enc_note(),
+                        self._apply_option_visibility()))
         rv.addRow("Encoder", self.enc_box)
         # ---- P3 video options: every one of these maps 1:1 to a controller
         # kwarg; nothing here decides anything itself (F2/F15: remux is a
@@ -199,6 +202,20 @@ class MainWindow(QMainWindow):
         self.lbl_remux.setWordWrap(True)
         self.lbl_remux.setStyleSheet("color:#b3541e;")
         rv.addRow(self.lbl_remux)
+        # QFormLayout.addRow returns no row index in PySide6 - derive them
+        # by scanning the form once (cheap, fixed set).
+        self._row = {
+            "enc": self._row_of(self.enc_box),
+            "remux": self._row_of(self.chk_remux),
+            "remux_into": self._row_of(self.remux_box),
+            "tone": self._row_of(self.chk_tonemap),
+            "audio": self._row_of(self.chk_audio_replace),
+            "rate": self._row_of(self.rad_crf),
+            "quality": self._row_of(self.quality),
+            "pdf": self._row_of(self.deep_pdf),
+            "note": self._row_of(self.lbl_note),
+            "remuxmsg": self._row_of(self.lbl_remux),
+        }
         splitter.addWidget(right)
 
         # bottom: queue table + run control
@@ -368,8 +385,12 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------- P3 option enablement
     def _sync_options_enabled(self) -> None:
-        """Grey-with-reason for every P3 control; never hide (F3). The
-        machine's facts come from the controller, not from guesses here."""
+        """Grey-with-reason for every P3 control. The machine's facts come
+        from the controller, not from guesses here. (F3's "never hide" is
+        about TARGETS the machine cannot reach; controls that MEAN nothing
+        for the selected category are hidden - live-user feedback: audio
+        must not show PDF rows.)"""
+        self._apply_option_visibility()
         cat = self.cat_box.currentText()
         is_v = cat == "video"
         remux = is_v and self.chk_remux.isChecked()
@@ -401,6 +422,83 @@ class MainWindow(QMainWindow):
             self.tgt_box.setToolTip("")
             self.enc_box.setEnabled(self.enc_box.count() > 0)
         self._update_remux_status()
+
+    # ---------------------------------------------- adaptive panel (per category)
+    @staticmethod
+    def _layout_has(layout, widget) -> bool:
+        i = 0
+        while (li := layout.itemAt(i)) is not None:
+            if li.widget() is widget:
+                return True
+            if li.layout() and MainWindow._layout_has(li.layout(), widget):
+                return True
+            i += 1
+        return False
+
+    def _row_of(self, widget) -> int:
+        """Form row index that contains WIDGET (fields, labels, and widgets
+        nested inside a row's sub-layout all count)."""
+        for r in range(self._form.count()):
+            for role in (QFormLayout.ItemRole.LabelRole,
+                         QFormLayout.ItemRole.FieldRole):
+                item = self._form.itemAt(r, role)
+                if item is None:
+                    continue
+                if item.widget() is widget:
+                    return r
+                if item.layout() and self._layout_has(item.layout(), widget):
+                    return r
+        raise LookupError(f"widget not in form: {widget!r}")
+
+    @staticmethod
+    def _set_layout_visible(layout, visible: bool) -> None:
+        i = 0
+        while (li := layout.itemAt(i)) is not None:
+            if li.widget():
+                li.widget().setVisible(visible)
+            if li.layout():
+                MainWindow._set_layout_visible(li.layout(), visible)
+            i += 1
+
+    def _toggle_row(self, row: int, visible: bool) -> None:
+        """Hide/show BOTH cells of a form row - a QFormLayout row is not a
+        widget, so toggling only the field would strand its label."""
+        for role in (QFormLayout.ItemRole.LabelRole,
+                     QFormLayout.ItemRole.FieldRole):
+            item = self._form.itemAt(row, role)
+            if item is None:
+                continue
+            if item.widget():
+                item.widget().setVisible(visible)
+            elif item.layout():
+                self._set_layout_visible(item.layout(), visible)
+
+    def _apply_option_visibility(self) -> None:
+        """The panel adapts to the CURRENT selection: only options that mean
+        something for the chosen category/target are shown (live-user
+        feedback: audio must not show PDF rows). Unsupported TARGETS stay
+        visible and greyed (F3) - that rule is untouched; this hides
+        CONTROLS, which is a different thing."""
+        if not hasattr(self, "_row"):
+            return          # signals fire while _build is still assembling
+        cat = self.cat_box.currentText()
+        video = cat == "video"
+        # encoder row matters only where codecs exist; its note row only with text
+        self._toggle_row(self._row["enc"], self.enc_box.count() > 0)
+        self._toggle_row(self._row["remux"], video)
+        self._toggle_row(self._row["remux_into"], video and self.chk_remux.isChecked())
+        self._toggle_row(self._row["tone"], video)
+        self._toggle_row(self._row["audio"], video)
+        self._toggle_row(self._row["rate"], video)
+        self._toggle_row(self._row["quality"], cat == "image")
+        # per-page/text exports bypass the lossless ladder - a deep pass is
+        # only meaningful when the pdf target IS the pdf
+        deep_ok = (cat == "pdf" and bool(self._current_target())
+                   and self.ctrl.options_for("pdf", self._current_target())
+                   .get("target") is None)
+        self._toggle_row(self._row["pdf"], deep_ok)
+        self._toggle_row(self._row["note"], bool(self.lbl_note.text()))
+        self._toggle_row(self._row["remuxmsg"], video and bool(self.lbl_remux.text()))
 
     def _update_remux_status(self) -> None:
         """Show the machine's own copy-safety verdict (F3). Advisory: it is

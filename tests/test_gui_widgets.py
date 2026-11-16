@@ -352,3 +352,59 @@ class TestQueueControlsP5:
         assert win.table.rowCount() == 2
         assert all(win.table.item(i, 2).text() == "abandoned" for i in range(2))
         assert "Cancelled 2" in win.lbl_status.text()
+
+
+class TestAdaptivePanel:
+    """Live-user rule: the panel adapts to the selection - audio must not
+    show PDF/video rows. TARGETS keep grey-with-reason (F3); controls that
+    mean nothing for the current category/target are hidden (F3 covers
+    unsupported targets, not irrelevant controls)."""
+
+    @staticmethod
+    def _pick(win, cat, target=None):
+        win.cat_box.setCurrentIndex(win.cat_box.findText(cat))
+        if target:
+            j = win.tgt_box.findData(target)
+            assert j >= 0, f"fake report lacks target {target!r}"
+            win.tgt_box.setCurrentIndex(j)
+
+    @staticmethod
+    def _hidden(win, *names):
+        for n in names:
+            assert not getattr(win, n).isVisibleTo(win), f"{n} shown"
+
+    def test_audio_shows_no_video_or_pdf_controls(self, window):
+        self._pick(window, "audio")
+        self._hidden(window, "chk_remux", "deep_pdf", "quality", "rad_crf",
+                     "chk_tonemap", "chk_audio_replace")
+
+    def test_video_shows_only_video_controls(self, window):
+        self._pick(window, "video")
+        assert window.chk_remux.isVisibleTo(window)
+        assert window.rad_crf.isVisibleTo(window)
+        assert window.size_box.isVisibleTo(window)
+        assert window.chk_tonemap.isVisibleTo(window)
+        self._hidden(window, "deep_pdf", "quality")
+
+    def test_remux_reveals_container_picker_and_nothing_else(self, window):
+        self._pick(window, "video")
+        assert not window.remux_box.isVisibleTo(window)
+        window.chk_remux.setChecked(True)
+        assert window.remux_box.isVisibleTo(window)
+        window.chk_remux.setChecked(False)
+        assert not window.remux_box.isVisibleTo(window)
+
+    def test_image_shows_quality_and_nothing_video(self, window):
+        self._pick(window, "image")
+        assert window.quality.isVisibleTo(window)
+        self._hidden(window, "chk_remux", "chk_tonemap")
+
+    def test_pdf_deep_pass_only_for_the_lossless_target(self, window):
+        self._pick(window, "pdf", "pdf (lossless smaller)")
+        assert window.deep_pdf.isVisibleTo(window)
+        self._pick(window, "pdf", "png (per page)")
+        assert not window.deep_pdf.isVisibleTo(window)
+
+    def test_document_shows_format_menu_only(self, window):
+        self._pick(window, "document", "docx")
+        self._hidden(window, "chk_remux", "quality", "deep_pdf")

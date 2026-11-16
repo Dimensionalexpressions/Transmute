@@ -51,7 +51,12 @@ def test_live_report_structure(fast_report):
     assert len(calls) == n
 
 
-def test_hw_rows_skipped_without_gpu(fast_report):
+def test_hw_rows_skipped_without_gpu(fast_report, monkeypatch):
+    # Force a GPU-less machine deterministically: dev boxes DO have render
+    # nodes, and the stubbed trial would verify every hw encoder there -
+    # the skip-on-absent-nodes rule must be proven regardless of host.
+    monkeypatch.setattr(cap_mod, "_has_dri_render_node", lambda: False)
+    monkeypatch.setattr(cap_mod, "_has_nvidia_nodes", lambda: False)
     prober, _ = fast_report
     rep = prober.report(refresh=True)
     hw = [e for e in rep.encoders if e.hw]

@@ -37,3 +37,46 @@ def test_every_spec_has_a_primary_binary_name():
         assert spec.binary_names and all(spec.binary_names), (
             f"{name}: binary_names must be non-empty strings"
         )
+
+
+class TestHwTrialCommands:
+    """Real-machine lessons baked in as code, guarded as tests:
+    hardware encoders reject tiny (<~144px) samples with EINVAL, and on a
+    multi-GPU box the first render node may lack the encoder backend -
+    every node must get its own trial candidate."""
+
+    def _cap(self, name, codec, backend):
+        from transmute.probe.capability import EncoderCapability
+        return EncoderCapability(name=name, codec=codec, backend=backend,
+                                 hw=True, verified=False, fps=None)
+
+    def test_vaapi_gets_one_candidate_per_render_node(self, monkeypatch):
+        from pathlib import Path
+        from transmute.probe import capability as c
+        monkeypatch.setattr(c, "_render_nodes", lambda: [
+            Path("/dev/dri/renderD128"), Path("/dev/dri/renderD129")])
+        cmds = c._trial_cmds(Path("ffmpeg"), self._cap("hevc_vaapi", "hevc", "va-api"))
+        joined = [" ".join(map(str, cmd)) for cmd in cmds]
+        assert len(cmds) == 2
+        assert "renderD128" in joined[0] and "renderD129" in joined[1]
+        assert all("320x320" in j for j in joined), "hw samples must exceed NVENC's min size"
+
+    def test_nvenc_trial_never_forces_nv12_system_frames(self):
+        from pathlib import Path
+        from transmute.probe import capability as c
+        cmd = " ".join(map(str, c._trial_cmds(
+            Path("ffmpeg"), self._cap("h264_nvenc", "h264", "nvidia-nvenc"))[0]))
+        assert "format=yuv420p" in cmd and "format=nv12" not in cmd
+
+    def test_run_trials_succeeds_on_second_node(self, monkeypatch):
+        from transmute.probe import capability as c
+        monkeypatch.setattr(c, "_run_trial", lambda cmd: (
+            (False, None, "entrypoint missing")
+            if "renderD128" in " ".join(map(str, cmd)) else (True, 42.0, "")))
+        cmds = [["x", "renderD128"], ["x", "renderD129"]]
+        assert c._run_trials(cmds) == (True, 42.0, "")
+
+    def test_run_trials_keeps_last_reason_when_all_fail(self, monkeypatch):
+        from transmute.probe import capability as c
+        monkeypatch.setattr(c, "_run_trial", lambda cmd: (False, None, f"fail {cmd[0]}"))
+        assert c._run_trials([["a"], ["b"]]) == (False, None, "fail b")

@@ -38,7 +38,12 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 6  # 5 -> 6: A2 adds document export matrix rows (the ONLY
+SCHEMA_VERSION = 8  # 7 -> 8: libx264-family trial used crf 55, which is
+                    # out of x265's 0..51 range - HEVC showed as unavailable
+                    # on machines with a perfectly working x265.
+                    # 6 -> 7: hw trials rebuilt (320px sample, per-render-
+                    # node candidates, yuv420p for nvenc/amf) - old caches
+                    # carry falsely-unverified GPU rows. (the ONLY
                     # cache-invalidation lever - _PROBE_SALT is dead code)
 _PROBE_SALT = "p3c"  # bump to invalidate caches when trial logic changes
 # P3/F15: the ONLY tone-map chain the video engine may use, and the one the
@@ -78,9 +83,12 @@ SW_ENCODER_INFO: dict[str, dict[str, Any]] = {
     # codec -> how to classify + trial args; unknown encoders get neutral trials.
     "libaom-av1": {"codec": "av1", "trial": ["-crf", "55", "-cpu-used", "8"]},
     "libsvtav1": {"codec": "av1", "trial": ["-crf", "55", "-preset", "12"]},
-    "libx264": {"codec": "h264", "trial": ["-crf", "55", "-preset", "ultrafast"], "compat": True},
-    "libx264rgb": {"codec": "h264", "trial": ["-crf", "55", "-preset", "ultrafast"], "compat": True},
-    "libx265": {"codec": "hevc", "trial": ["-crf", "55", "-preset", "ultrafast"], "compat": True},
+    # x264-family CRF is 0..51 - 55 (valid for av1/vpx) makes libx265 refuse
+    # to open at all: the probe then reported HEVC unavailable on machines
+    # whose x265 encodes fine. Measured, not assumed.
+    "libx264": {"codec": "h264", "trial": ["-crf", "51", "-preset", "ultrafast"], "compat": True},
+    "libx264rgb": {"codec": "h264", "trial": ["-crf", "51", "-preset", "ultrafast"], "compat": True},
+    "libx265": {"codec": "hevc", "trial": ["-crf", "51", "-preset", "ultrafast"], "compat": True},
     "libopenh264": {"codec": "h264", "trial": ["-crf", "55"], "compat": True},
     "libvpx": {"codec": "vp8", "trial": ["-crf", "55", "-b:v", "0", "-deadline", "realtime", "-cpu-used", "8"]},
     "libvpx-vp9": {"codec": "vp9", "trial": ["-crf", "55", "-b:v", "0", "-deadline", "realtime", "-cpu-used", "8"]},
@@ -263,39 +271,48 @@ def gpu_force_disabled() -> bool:
     return os.environ.get("TRANSMUTE_DISABLE_GPU", "").lower() in ("1", "true", "yes")
 
 
-def _trial_cmd(ffmpeg: Path, cap: EncoderCapability) -> list[Any]:
-    """Synthetic 1s sample -> trial encode; hw paths upload via GPU."""
+def _render_nodes() -> list:
+    try:
+        return sorted(Path("/dev/dri").glob("renderD*"))
+    except OSError:
+        return []
+
+
+def _trial_cmds(ffmpeg: Path, cap: EncoderCapability) -> list[list[Any]]:
+    """Candidate trial commands for one encoder; first success verifies it.
+
+    Two hard-won facts about GPU encoders (both caught on real machines,
+    not in the docs):
+    * the sample must be >= ~144px wide - NVENC/HEVC-VAAPI reject 128x128
+      frames with EINVAL while software encoders happily eat them;
+    * a node-bound backend (VAAPI/QSV) may have NO capable engine on the
+      first render node (multi-GPU: renderD128 = NVIDIA where VAAPI lacks
+      HEVC entrypoints, renderD129 = AMD iGPU where it works). So every
+      render node becomes its own candidate instead of blindly taking [0].
+    """
     base: list[Any] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    frames: list[Any] = ["-f", "lavfi", "-i", "testsrc2=size=320x320:rate=25:duration=1",
+                         "-frames:v", "24"]
+    tail = SW_ENCODER_INFO.get(cap.name, {}).get("trial", [])
     if cap.hw:
         if cap.backend == "va-api":
-            node = None
-            try:
-                renders = sorted(Path("/dev/dri").glob("renderD*"))
-                node = str(renders[0]) if renders else "/dev/dri/card0"
-            except OSError:
-                node = "/dev/dri/card0"
-            base += ["-init_hw_device", f"vaapi=va:{node}", "-filter_hw_device", "va"]
-            vf = "scale=128:128,format=nv12,hwupload"
-        elif cap.backend == "intel-oneapi":
-            try:
-                renders = sorted(Path("/dev/dri").glob("renderD*"))
-                dev = str(renders[0]) if renders else ""
-            except OSError:
-                dev = ""
-            if dev:
-                base += ["-init_hw_device", f"qsv=qs:{dev}"]
-            vf = "scale=128:128,format=nv12,hwupload"
-        else:  # nvenc/amf take system frames (sw decode -> GPU enc path internally)
-            vf = "scale=128:128,format=nv12"
-        base += ["-f", "lavfi", "-i", "testsrc2=size=128x128:rate=25:duration=1",
-                 "-frames:v", "24", "-vf", vf, "-c:v", cap.name]
-    else:
-        base += ["-f", "lavfi", "-i", "testsrc2=size=128x128:rate=25:duration=1",
-                 "-frames:v", "24", "-c:v", cap.name]
-    if cap.name in SW_ENCODER_INFO:
-        base += SW_ENCODER_INFO[cap.name].get("trial", [])
-    base += ["-f", "null", "-"]
-    return base
+            nodes = _render_nodes() or [Path("/dev/dri/card0")]
+            return [base + ["-init_hw_device", f"vaapi=va:{node}",
+                            "-filter_hw_device", "va"]
+                    + frames + ["-vf", "format=nv12,hwupload",
+                                "-c:v", cap.name] + tail
+                    + ["-f", "null", "-"] for node in nodes]
+        if cap.backend == "intel-oneapi":
+            nodes = _render_nodes() or [Path("/dev/dri/card0")]
+            return [base + ["-init_hw_device", f"qsv=qs:{node}"]
+                    + frames + ["-vf", "format=nv12,hwupload",
+                                "-c:v", cap.name] + tail
+                    + ["-f", "null", "-"] for node in nodes]
+        # nvenc/amf take system frames (driver uploads internally);
+        # forcing nv12 system frames is rejected - yuv420p is accepted.
+        return [base + frames + ["-vf", "format=yuv420p", "-c:v", cap.name]
+                + tail + ["-f", "null", "-"]]
+    return [base + frames + ["-c:v", cap.name] + tail + ["-f", "null", "-"]]
 
 
 def _trial_cmd_audio(ffmpeg: Path, cap: EncoderCapability) -> list[Any]:
@@ -323,6 +340,19 @@ def _run_trial(cmd: list[Any]) -> tuple[bool, float | None, str]:
         return False, None, "trial encode timed out (25s)"
     tail = _stderr_tail(res.stderr_text)
     return False, None, tail or f"trial encode failed (exit {res.returncode})"
+
+
+def _run_trials(cmds: list[list[Any]]) -> tuple[bool, float | None, str]:
+    """Try each candidate command; verified if ANY works (one per render
+    node - the reason kept is from the last node so a mixed GPU box never
+    claims 'entrypoint missing' when some node encoded fine a moment ago)."""
+    reason = ""
+    for cmd in cmds:
+        ok, fps, r = _run_trial(cmd)
+        if ok:
+            return True, fps, ""
+        reason = r or reason
+    return False, None, reason
 
 
 def _stderr_tail(text: str, limit: int = 300) -> str:
@@ -497,7 +527,7 @@ class CapabilityProber:
                     ok, fps, reason = (False, None, "")
                     cap.skipped = "image encoding handled via Pillow path"
                 else:
-                    ok, fps, reason = _run_trial(_trial_cmd(ffmpeg, cap))
+                    ok, fps, reason = _run_trials(_trial_cmds(ffmpeg, cap))
                     if ok:
                         # Measured for every verified VIDEO encoder: supported
                         # pixel formats decide bit-depth claims AND whether the

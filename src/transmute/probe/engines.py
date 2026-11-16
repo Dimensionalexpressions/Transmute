@@ -141,12 +141,26 @@ def _conventional_dirs() -> list[Path]:
         out: list[Path] = []
         for base in dirs:
             out += [base / "ffmpeg" / "bin", base / "FFmpeg" / "bin",
-                    base / "qpdf", base / "gs"]
-            out += sorted(base.glob("gs/gs*"))            # gs\gs10.13.0\bin
-            out += [base / "LibreOffice" / "program", base / "Pandoc"]
+                    base / "qpdf", base / "qpdf" / "bin", base / "gs", base / "Pandoc"]
+            # Ghostscript installs versioned: gs\gs10.13.0\bin - the bin part
+            # was missing (P6 fix: candidates pointed at the VERSION dir).
+            out += [g / "bin" for g in sorted(base.glob("gs/gs*"))]
+            out += [base / "LibreOffice" / "program"]
+            # Poppler Windows builds (oschwartz10612 etc) unzip to
+            # poppler-*\Library\bin or poppler-*\bin.
+            out += [p / "Library" / "bin" for p in sorted(base.glob("poppler*"))]
+            out += [p / "bin" for p in sorted(base.glob("poppler*"))]
         local = os.environ.get("LOCALAPPDATA", "")
         if local:
-            out.append(Path(local) / "Programs")
+            out += [Path(local) / "Programs",
+                    Path(local) / "Microsoft" / "WinGet" / "Links"]  # winget shims
+        pd = os.environ.get("ProgramData", "")
+        if pd:
+            out.append(Path(pd) / "chocolatey" / "bin")               # choco shims
+        try:
+            out.append(Path(os.path.expanduser("~")) / "scoop" / "shims")
+        except (RuntimeError, KeyError):
+            pass
         return out
     # Linux / other POSIX
     return [Path(d) for d in ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin",
@@ -215,9 +229,14 @@ class EngineManager:
                 out.append(Path(found))
         for d in _conventional_dirs():
             for binary in _names_for(spec):
-                cand = d / binary
-                if cand.exists():
-                    out.append(cand)
+                # shutil.which honours PATHEXT (finds ffmpeg.exe); a plain
+                # directory join does not - on Windows the conventional-dir
+                # candidate needs the .exe suffix too (P6).
+                names = (binary,) if not _IS_WINDOWS else (binary, binary + ".exe")
+                for name in names:
+                    cand = d / name
+                    if cand.exists():
+                        out.append(cand)
         # de-dup preserving order
         seen: set[str] = set()
         uniq = []

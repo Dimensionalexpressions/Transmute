@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from .. import winpaths
 from ..errors import EngineUnavailable  # noqa: F401  (re-export for engines)
 from ..paths import paths  # noqa: F401  (kept for engine default log roots)
 
@@ -95,6 +96,10 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
     gpu=True while a governor is present takes a GPU concurrent-session slot.
     """
     argv_s = [str(a) for a in argv]
+    # P6: on Windows, path arguments over MAX_PATH are rewritten to the
+    # \\?\ / \\?\UNC\ extended form (pure string logic; identical no-op on
+    # Linux - protected by tests in test_winpaths.py).
+    argv_s = winpaths.protect_argv(argv_s)
     full = list(governor.command_prefix()) + argv_s if governor else argv_s
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -11,8 +11,15 @@ Linux enforcement (works on any distro, no root, no systemd needed):
   3. GPU sessions capped via semaphore; I/O via token bucket.
 Why not systemd-run CPUQuota: requires a user D-Bus/systemd scope which is
 not guaranteed present (it is NOT on this bench); SIGSTOP feedback always is.
-Windows: interface stubs only in P1 (Job Object CPU rate control is P9) -
-documented, no silent false promise.
+Windows (P6): a Job Object with a kernel-enforced CPU hard cap
+(JOB_OBJECT_CPU_RATE_CONTROL HARD_CAP) hosts every engine child, plus
+KILL_ON_JOB_CLOSE as the child-leak safety net, plus IO_PRIORITY_LOW per
+child (ntdll!NtSetInformationProcess, measured NTSTATUS). The API is tried
+and MEASURED; where it fails (old SKU, group policy) the governor degrades
+to suspend/resume feedback (psutil works on Windows) with the OS's own
+reason in status(). Per-volume IO *rate* limits need admin (Storage QoS) -
+not promised, carried as a caveat; the process-level LOW class is the
+honest non-admin slice.
 """
 from __future__ import annotations
 
@@ -26,6 +33,8 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+
+from .winjob import WinJob
 
 log = logging.getLogger(__name__)
 
@@ -67,11 +76,12 @@ class ResourceGovernor:
     def __init__(self, *, cpu_cap_pct: float = _DEFAULT_CAP, resume_margin_pct: float = 10.0,
                  sample_s: float = 0.4, gpu_sessions: int = 2,
                  io_rate_per_s: float = 60.0, io_burst: float = 120.0,
-                 enabled: bool | None = None):
+                 enabled: bool | None = None, win_job_api=None):
         if enabled is None:
             enabled = os.environ.get("TRANSMUTE_GOVERNOR", "1").lower() not in ("0", "off", "no")
         self.enabled = enabled
-        self.posix = os.name == "posix"
+        self.win = sys.platform == "win32"
+        self.posix = os.name == "posix" and not self.win
         self.cpu_cap_pct = float(cpu_cap_pct)
         self.resume_margin_pct = float(resume_margin_pct)
         self.sample_s = float(sample_s)
@@ -85,10 +95,18 @@ class ResourceGovernor:
         self._thread: threading.Thread | None = None
         self.samples: list[tuple[float, float]] = []  # (ts, cpu_pct) for tests/diagnostics
         self.caveats: list[str] = []
-        if not self.posix:
-            self.caveats.append("Windows: CPU hard cap (Job Object) is P9 work; P1 Windows "
-                                "governor is interface stubs - conversions run at low priority "
-                                "only.")
+        # P6: on Windows every engine child lives in one shared Job Object
+        # (kernel-enforced CPU hard cap + kill-on-close). win_job_api exists
+        # for the Linux unit tests; production passes None -> real ctypes.
+        self._job = WinJob(self.cpu_cap_pct, api=win_job_api) if self.win else None
+        # Enforcement needs a mechanism: SIGSTOP groups (posix) or Job
+        # Object/suspend-resume (win). Tests inject win=True + a fake job api
+        # to exercise the whole Windows path on Linux.
+        self.enforceable = self.posix or self.win
+        if self.win:
+            self.caveats.append(
+                "Windows: per-volume IO rate limits need admin (Storage QoS) - not "
+                "applied; engine children run at LOW IO priority (non-admin, measured).")
         try:
             import psutil  # noqa: F401
             self._psutil = psutil
@@ -112,15 +130,40 @@ class ResourceGovernor:
 
     def io_bucket(self) -> TokenBucket | None:
         return self._io if self.enabled else None
+    # NOTE: Windows IO priority (IO_PRIORITY_LOW via ntdll, measured) is
+    # applied inside WinJob.attach_pid at register_child time - the single
+    # integration point where a child handle is already open. On Linux the
+    # equivalent is the `ionice -c 2` launch prefix above.
 
     # --------------------------------------------------------- child tracking
     def register_child(self, pid: int) -> int | None:
-        if not self.enabled or not self.posix or self._psutil is None:
+        if not self.enabled or not self.enforceable or self._psutil is None:
             return None
         token = next(self._tokens)
         with self._child_lock:
             self._children[pid] = token
+        # Win: put the child under the Job Object NOW. A failed attach does
+        # NOT unregister it - suspend/resume feedback still covers it.
+        if self._job is not None:
+            if not self._job.attach_pid(pid):
+                self._note_degraded()
+            elif self._job.io_error:
+                self._note_io_refused()
         return token
+
+    def _note_degraded(self) -> None:
+        if self._job is None or self._job.active:
+            return
+        note = (f"Windows Job Object cap unavailable ({self._job.error}); "
+                "using suspend/resume feedback instead")
+        if note not in self.caveats:
+            self.caveats.append(note)
+
+    def _note_io_refused(self) -> None:
+        note = (f"Windows IO priority not applied ({self._job.io_error}); "
+                "engine children keep the default IO class")
+        if note not in self.caveats:
+            self.caveats.append(note)
 
     def unregister_child(self, token: int) -> None:
         # MUST resume before the caller waits for exit: a stopped group can
@@ -138,8 +181,12 @@ class ResourceGovernor:
 
     # --------------------------------------------------------- lifecycle
     def start(self) -> "ResourceGovernor":
-        if not (self.enabled and self.posix and self._psutil is not None) or self._thread:
+        if not (self.enabled and self.enforceable and self._psutil is not None) \
+                or self._thread:
             return self
+        if self._job is not None and self._job.ensure():
+            self._job.error = None  # transient pre-fix; a live job supersedes it
+        self._note_degraded()       # records the ONE caveat if the job is dead
         self._psutil.cpu_percent(interval=None)  # seed differential measurement
         self._stop_evt.clear()
         self._thread = threading.Thread(target=self._monitor, name="transmute-governor",
@@ -157,6 +204,8 @@ class ResourceGovernor:
         for pid in pids:
             self._cont(pid)
         self._stopped.clear()
+        if self._job is not None:
+            self._job.close()   # KILL_ON_JOB_CLOSE: no engine may outlive us
 
     __enter__ = start
 
@@ -173,19 +222,39 @@ class ResourceGovernor:
             self.samples.append((time.time(), cpu))
             if len(self.samples) > 100000:
                 del self.samples[:50000]
-            with self._child_lock:
-                pids = list(self._children)
-            if cpu >= self.cpu_cap_pct:
+            self._react(cpu)
+
+    def _react(self, cpu: float) -> None:
+        """One measured sample -> one enforcement decision. Hysteresis
+        (cap / cap-margin) prevents oscillation on either platform."""
+        with self._child_lock:
+            pids = list(self._children)
+        if cpu >= self.cpu_cap_pct:
+            if self._job is not None and self._job.active:
+                # Kernel cap squeezed below target until total load cools;
+                # children keep running, just bounded - strictly better
+                # than stop/continue and race-free.
+                self._job.set_cap(max(1.0, self.cpu_cap_pct - self.resume_margin_pct))
+            else:
                 for pid in pids:
                     if pid not in self._stopped:
                         self._stop_child(pid)
-            elif cpu <= self.cpu_cap_pct - self.resume_margin_pct:
-                for pid in list(self._stopped):
-                    if pid in pids:
-                        self._cont(pid)
-                        self._stopped.discard(pid)
+        elif cpu <= self.cpu_cap_pct - self.resume_margin_pct:
+            if self._job is not None and self._job.active:
+                self._job.set_cap(self.cpu_cap_pct)
+            for pid in list(self._stopped):
+                if pid in pids:
+                    self._cont(pid)
+                    self._stopped.discard(pid)
 
     def _stop_child(self, pid: int) -> None:
+        if self.win:
+            try:  # psutil suspend == TerminateJobObject-free freeze; Windows-safe
+                self._psutil.Process(pid).suspend()
+                self._stopped.add(pid)
+            except Exception:  # noqa: BLE001  child gone/denied: retry next sample
+                pass
+            return
         try:
             os.killpg(pid, signal.SIGSTOP)
             self._stopped.add(pid)
@@ -193,6 +262,12 @@ class ResourceGovernor:
             pass
 
     def _cont(self, pid: int) -> None:
+        if self.win:
+            try:
+                self._psutil.Process(pid).resume()
+            except Exception:  # noqa: BLE001
+                pass
+            return
         try:
             os.killpg(pid, signal.SIGCONT)
         except (ProcessLookupError, PermissionError, OSError):
@@ -200,16 +275,27 @@ class ResourceGovernor:
 
     # --------------------------------------------------------- diagnostics
     def status(self) -> dict:
+        if not self.win:
+            wjo = "n/a"
+        elif self._job is None:
+            wjo = "not initialised"
+        elif self._job.active:
+            wjo = (f"active: kernel hard cap {self._job.cap_pct:.0f}% of total CPU, "
+                   f"{len(self._job.assigned_pids)} child(ren) assigned, kill-on-close; "
+                   f"IO priority: {self._job.io_state()}")
+        else:
+            wjo = f"unavailable ({self._job.error}); suspend/resume feedback in use"
         return {"enabled": self.enabled, "platform": sys.platform,
                 "cpu_cap_pct": self.cpu_cap_pct,
-                "feedback_cap_active": bool(self.enabled and self.posix and self._psutil),
+                "feedback_cap_active": bool(self.enabled and self.enforceable and self._psutil),
                 "tracked_children": len(self._children),
                 "stopped_children": len(self._stopped),
                 "samples": len(self.samples),
                 "caveats": list(self.caveats),
-                "windows_job_object": "P9 stub" if not self.posix else "n/a"}
+                "windows_job_object": wjo}
 
 
 def make_governor(**kw) -> ResourceGovernor:
-    """Factory; platform dispatch happens inside (Windows = documented stubs)."""
+    """Factory; platform dispatch happens inside (Windows: Job Object cap,
+    measured, with suspend/resume fallback - see governor/winjob.py)."""
     return ResourceGovernor(**kw)

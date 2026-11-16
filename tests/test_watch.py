@@ -305,7 +305,12 @@ def test_watcher_to_journal_end_to_end(tmp_path):
         try:
             (src / "sub" / "deep.mp3").parent.mkdir(parents=True)
             (src / "sub" / "deep.mp3").write_bytes(b"M" * 50)
-            _wait_until(lambda: journal_file.exists()
+            # Wait for the FULL delivery: the journal write happens INSIDE
+            # on_settled, dispatched++ only after it returns - waiting on the
+            # journal alone races the counter under scheduler load (P6 full-
+            # suite flake, seen exactly once on a busy bench).
+            _wait_until(lambda: h.w.dispatched == 1
+                        and journal_file.exists()
                         and "queued" in journal_file.read_text(),
                         what="drop travels watcher -> JobQueue -> journal")
             journal = journal_file.read_text()

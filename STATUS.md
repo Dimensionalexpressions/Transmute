@@ -262,6 +262,73 @@ decision). This is stated, not hidden.
   status line states what will still finish ("any job already running
   will finish").
 
+## P6 partial evidence (Windows support; Linux bench — commands from repo root)
+
+What is DONE and PROVEN ON THIS BENCH (decision logic, OS-independent, via an
+injectable fake kernel32/ntdll — the real ctypes calls run on the Windows CI
+job, see honest gap below):
+
+- **Engine discovery, Windows install chains** (`src/transmute/probe/engines.py`):
+  `_conventional_dirs()` now yields Program Files / LOCALAPPDATA\Programs /
+  WinGet Links / chocolatey\bin / scoop\shims, fixes a P1 bug (Globus gs was
+  globbed to the version dir WITHOUT `\bin`), and adds poppler `Library\bin`.
+  Conventional-dir candidates now also try the `.exe` suffix on Windows
+  (`shutil.which` honours PATHEXT; a Path join does not). 4 regression tests:
+  `tests/test_engines_windows.py` (flips `_IS_WINDOWS`, builds a fake tree).
+  Command: `TRANSMUTE_ROOT=$PWD/.gui-live .venv/bin/python -m pytest -q tests/test_engines_windows.py` → 4 passed.
+- **Long/UNC path handling** (`src/transmute/winpaths.py`, new): pure `ntpath`
+  logic, import-safe and fully unit-tested on Linux. `\\?\` extended form,
+  `\\?\UNC\` for UNC, `.`/`..`/separators normalised BEFORE the prefix (the
+  extended form disables ALL parser magic), threshold len>=MAX_PATH(260),
+  idempotent, `protect()` is a no-op off Windows and for short paths.
+  `protect_argv` rewrites only drive/UNC file tokens in a child's argv —
+  flags (`-`, `/flag`) and numbers are never rewritten — and is wired into the
+  SINGLE `run_command` chokepoint in `engines/base.py`, so every engine child
+  gets it for free. Command: `... .venv/bin/python -m pytest -q tests/test_winpaths.py` → 17 passed.
+- **Windows governor: kernel-enforced Job Object cap** (`src/transmute/governor/winjob.py`
+  + rewritten `governor/__init__.py`, new): replaces the P1 "Windows governor
+  is stubs". One shared Job Object hosts every engine child with a
+  `JOB_OBJECT_CPU_RATE_CONTROL HARD_CAP` (CPU hard cap = percent×100) and
+  `KILL_ON_JOB_CLOSE` (a crashed app cannot leak running encoders); per-child
+  `IO_PRIORITY_LOW` via `ntdll!NtSetInformationProcess` (measured NTSTATUS —
+  the honest non-admin slice; per-volume Storage-QoS rates still need admin,
+  carried as a caveat, never promised). Every Win32 call is measured (BOOL +
+  GetLastError / NTSTATUS); a refusal turns the job inactive with the OS's OWN
+  reason recorded and STAYS degraded (no per-sample retry spam), and the
+  governor then falls back to psutil suspend/resume feedback — a degradation
+  with a reason, never a silent false promise. Linux path is byte-for-byte
+  unchanged (`test_linux_governor_unchanged_by_p6`). Command:
+  `... .venv/bin/python -m pytest -q tests/test_governor_winjob.py` → 13 passed.
+- **Windows CI job** (`.github/workflows/ci.yml`): a `windows-latest` job runs
+  the SAME suite (`-m "not slow"`) and a dedicated load step that runs
+  `tests/test_governor_windows.py` (real Job Object, real busy-loop children,
+  measured CPU <=75% mean + KILL_ON_JOB_CLOSE reaping) and FAILS if that test
+  skips. The win32-only load test self-skips on Linux (honest, not a pass).
+  YAML validated with `python -c "import yaml; yaml.safe_load(...)"` → OK.
+
+### Bugs found & fixed during P6 (kept as regression tests)
+
+- **ci.yml had never parsed.** Two step names embed a second `: ` (e.g.
+  `ffmpeg flavour: distro`) which is invalid YAML for a plain scalar — the
+  workflow could never have run. Fixed by quoting the names; validated the
+  whole file parses with PyYAML (installed dev-only via uv into the venv).
+- **P4 watch-test race, surfaced by the fuller P6 suite load.**
+  `test_watcher_to_journal_end_to_end` asserted `dispatched == 1` after waiting
+  only on the journal file, but `dispatched += 1` happens AFTER `on_settled`
+  returns while the journal write happens INSIDE it — under scheduler load the
+  counter could still read 0. Test-only fix: wait on both conditions.
+
+## Honest P6 gap (the gate is NOT closed on this bench)
+
+The P6 gate has two halves. Half 1 (Linux: engine discovery, winpaths, Job
+Object *logic*, governor fallback, Linux suite unchanged) is DONE and PROVEN
+above. Half 2 — "Windows CI runner: same suite green; governor load test on
+Windows" — CANNOT be closed here: there is no git remote, no `gh` auth, and
+outbound network is blocked, so no CI has ever run anywhere. The Windows half
+stays an honest, tracked gap until the repo is pushed to a host with a
+windows-latest runner. The code is written to be correct there (real ctypes,
+measured), but "written" is not "proven on Windows".
+
 ## What P1 actually proves (measured, not claimed)
 
 - **Capability probe** parses 226 encoders from real ffmpeg, trial-encodes
@@ -395,8 +462,11 @@ decision). This is stated, not hidden.
 - GUI verified **offscreen only** (no display in this sandbox); no
   interactive X11/Wayland session has been exercised. First-frame previews
   shipped in P3; progress still ticks per job — byte-level progress is P7.
-- Windows governor = declared stubs (`status()["windows_job_object"]`
-  reports the state); real Job Object control is P6.
+- Windows governor: P6 replaced the stubs with a real Job Object cap +
+  IO_PRIORITY_LOW + long/UNC path handling; decision logic is unit-proven on
+  Linux via a fake api, but **no real Windows run yet** (no CI runner exists)
+  — see "Honest P6 gap" above. Windows registry-based engine discovery is
+  also not done (PATH + conventional dirs only); custom paths cover it.
 - qpdf/pandoc real-engine paths untested on this bench (tools absent) —
   simulated here, real CI matrix in P5.
 - Deep PDF (ghostscript) is lossy — only on explicit opt-in, and the GUI

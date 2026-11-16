@@ -101,6 +101,21 @@ class TestPickersMirrorTheReport:
         assert window.enc_box.itemText(1) == "SVT-AV1 - fast AV1"
         assert "libsvtav1" not in window.enc_box.itemText(1)
 
+    def test_encoder_note_is_meaning_not_raw_id(self, window):
+        """Live-test finding: the note line showed 'ffmpeg/libaom-av1' -
+        meaningless AND it implied auto uses the static row, not the verified
+        ladder. Text = what the choice MEANS; raw ids only in the tooltip."""
+        window.cat_box.setCurrentText("video")
+        assert window.enc_box.currentIndex() == 0  # auto
+        assert "fastest verified encoder" in window.lbl_note.text()
+        assert "SVT-AV1" in window.lbl_note.text()  # ladder winner, human
+        assert "libsvtav1" not in window.lbl_note.text()
+        assert "libaom-av1" not in window.lbl_note.text()
+        window.enc_box.setCurrentIndex(2)  # explicit override
+        assert window.lbl_note.text().startswith("Using AOM reference")
+        assert "libaom-av1" not in window.lbl_note.text()
+        assert "ffmpeg ->" in window.lbl_note.toolTip()  # raw chain, tooltip
+
     def test_no_ladder_for_image_targets(self, window):
         window.cat_box.setCurrentText("image")
         assert window.enc_box.count() == 0

@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
         self.tgt_box.currentIndexChanged.connect(self._load_encoders)
         rv.addRow("Target", self.tgt_box)
         self.enc_box = QComboBox()
+        self.enc_box.currentIndexChanged.connect(lambda *_: self._update_enc_note())
         rv.addRow("Encoder", self.enc_box)
         # ---- P3 video options: every one of these maps 1:1 to a controller
         # kwarg; nothing here decides anything itself (F2/F15: remux is a
@@ -334,14 +335,36 @@ class MainWindow(QMainWindow):
             for enc in ladder:
                 self.enc_box.addItem(self.ctrl.human_encoder(enc), enc)
         self.enc_box.setEnabled(bool(ladder))
-        tinfo = self._target_info(cat, target) if target else None
-        note = ""
-        if tinfo is not None:
-            note = tinfo.note
-        if not ladder and note:
-            note = f"Engine chain: {note}"
-        self.lbl_note.setText(note)
+        self._update_enc_note()
         self._sync_options_enabled()
+
+    def _update_enc_note(self) -> None:
+        """Human words for what the encoder choice MEANS; raw engine ids go
+        to the tooltip. (Live-test finding: 'ffmpeg/libaom-av1' shown next
+        to 'auto' meant nothing AND implied a false promise - auto follows
+        the verified ladder, not the static matrix row.)"""
+        cat = self.cat_box.currentText()
+        target = self._current_target()
+        tinfo = self._target_info(cat, target) if target else None
+        raw = tinfo.note if tinfo is not None else ""
+        ladder = self.ctrl.encoders(cat, target) if target else []
+        if not ladder:
+            # non-codec targets: engine picks internally; chain label is the
+            # only honest statement, raw ids stay in the tooltip (F5)
+            self.lbl_note.setText("Engine chain: " + raw if raw else "")
+            self.lbl_note.setToolTip(raw)
+            return
+        enc = self.enc_box.currentData()
+        if enc:
+            self.lbl_note.setText(
+                f"Using {self.ctrl.human_encoder(enc)} - overrides the auto "
+                "pick below.")
+            self.lbl_note.setToolTip(f"{raw}\nselected: {enc}".strip())
+            return
+        self.lbl_note.setText(
+            "auto uses this machine's fastest verified encoder: "
+            f"{self.ctrl.human_encoder(ladder[0])}.")
+        self.lbl_note.setToolTip(raw)
 
     # ------------------------------------------------- P3 option enablement
     def _sync_options_enabled(self) -> None:

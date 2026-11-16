@@ -45,6 +45,15 @@ def _report() -> CapabilityReport:
                   note="pdftotext (poppler-utils) not found on this machine"),
         MatrixRow(category="document", target="pdf", path="libreoffice",
                   available=True, recommended=True),
+        MatrixRow(category="document", target="docx", path="LibreOffice/pandoc",
+                  available=True),
+        MatrixRow(category="document", target="rtf", path="LibreOffice/pandoc",
+                  available=False,
+                  note="install LibreOffice or pandoc for document conversion"),
+        MatrixRow(category="document", target="markdown", path="pandoc",
+                  available=True),
+        MatrixRow(category="document", target="txt", path="LibreOffice/pandoc",
+                  available=True),
     ]
     enc = [
         EncoderCapability(name="libsvtav1", codec="av1", backend="cpu",
@@ -98,6 +107,13 @@ class TestPickers:
         assert "not available" in ts["txt (text)"].label   # greyed, never hidden (F3)
         assert "pdftotext" in ts["txt (text)"].reason      # the machine's own reason
         assert ts["pdf (lossless smaller)"].label.startswith("Smaller PDF")
+
+    def test_document_menu_lists_target_formats(self, ctrl):
+        # the user's complaint: menus must name the FORMATS, not the category
+        ts = {t.target: t for t in ctrl.targets("document")}
+        assert list(ts) == ["pdf", "docx", "rtf", "markdown", "txt"]
+        assert "DOCX" in ts["docx"].label and "Markdown" in ts["markdown"].label
+        assert not ts["rtf"].available and "LibreOffice" in ts["rtf"].reason
 
     def test_unavailable_carries_machine_reason(self, ctrl):
         hevc = next(t for t in ctrl.targets("video") if t.target == "hevc")
@@ -169,6 +185,15 @@ class TestEnqueue:
         assert ctrl.options_for("pdf", "jpg (per page)") == {"target": "jpg"}
         assert ctrl.options_for("pdf", "txt (text)") == {"target": "txt"}
         assert ctrl.dst_for("/x/a.pdf", "pdf", "txt (text)", "/out").name == "a.txt"
+
+    def test_document_export_options_and_suffixes(self, ctrl):
+        assert ctrl.options_for("document", "pdf") == {}   # old path unchanged
+        assert ctrl.options_for("document", "docx") == {"target": "docx"}
+        assert ctrl.options_for("document", "markdown") == {"target": "markdown"}
+        assert ctrl.dst_for("/x/a.docx", "document", "txt", "/out").name == "a.txt"
+        assert ctrl.dst_for("/x/a.txt", "document", "markdown", "/out").name == "a.md"
+        assert ctrl.dst_for("/x/a.odt", "document", "html", "/out").name == "a.html"
+        assert ctrl.dst_for("/x/a.md", "document", "pdf", "/out").name == "a.pdf"
 
     def test_pdf_txt_is_one_job(self, ctrl):
         ctrl.enqueue("/x/a.pdf", "/out", "pdf", "txt (text)")

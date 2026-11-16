@@ -22,6 +22,28 @@ LO_FORMAT = {".docx": "docx", ".doc": "doc", ".odt": "odt", ".rtf": "rtf",
              ".xls": "xls", ".ods": "ods", ".csv": "csv", ".epub": "epub"}
 LATEX_WRITERS = ("pdflatex", "xelatex", "lualatex", "tectonic", "typst")
 
+# --- A2 exports (transform, NOT the document->PDF path) -----------------
+# pandoc readers by source suffix (explicit -f: pandoc cannot guess .txt etc)
+PANDOC_READER = {".md": "markdown", ".markdown": "markdown", ".txt": "plain",
+                 ".html": "html", ".htm": "html", ".rst": "rst", ".epub": "epub"}
+# pandoc writers by target id
+PANDOC_WRITER = {"docx": "docx", "odt": "odt", "rtf": "rtf", "html": "html",
+                 "markdown": "markdown", "txt": "plain"}
+# LibreOffice export filters by target id
+LO_OUT = {"docx": "docx", "odt": "odt", "rtf": "rtf", "html": "html",
+          "txt": "txt:Text (encoded):UTF8"}
+DOC_TARGETS = ("docx", "odt", "rtf", "html", "markdown", "txt")
+# format magics checked BEFORE accepting an export (same doctrine as PDF A1)
+_OUT_MAGIC = {"docx": (b"PK\x03\x04",), "odt": (b"PK\x03\x04",),
+              "rtf": (b"{\\rtf",), "html": (b"<",)}
+_TARGET_EXT = {".md": ".md", ".markdown": ".md", ".txt": ".txt", ".text": ".txt",
+               ".htm": ".html"}
+# what each export target's own extension is (same-format detection)
+_TARGET_AS_EXT = {"markdown": ".md", "txt": ".txt", "html": ".html"}
+# sources that MUST be ZIP containers - LibreOffice would happily "convert"
+# garbage bytes via its text-import fallback, so the engine checks first.
+_ZIP_SOURCES = {".docx", ".odt", ".odp", ".xlsx", ".pptx", ".epub"}
+
 
 class DocumentEngine:
     category = "document"
@@ -50,17 +72,24 @@ class DocumentEngine:
                             info={"libreoffice": lo_ok, "pandoc_latex": pandoc_ok})
 
     # ------------------------------------------------------------- convert
-    def convert(self, src: Path, dst: Path, *, timeout_s: float = 600.0,
+    def convert(self, src: Path, dst: Path, *, target: str | None = None,
+                timeout_s: float = 600.0,
                 governor=None, log_id: str | None = None,
                 log_root: Path | None = None) -> EngineResult:
         t0 = time.monotonic()
         src, dst = Path(src), Path(dst)
+        if not src.is_file():
+            return EngineResult("failed", reason="source file missing")
+        # A2 exports are transforms: they never touch the document->PDF path,
+        # and they self-verify (clean exit + format magic) inside convert().
+        if target and target != "pdf":
+            return self._export(src, dst, target, timeout_s=timeout_s,
+                                governor=governor, log_id=log_id,
+                                log_root=log_root, t0=t0)
         avail = self.availability()
         if not avail.ok:
             return EngineResult("failed", reason=avail.reason,
                                 data={"engine_unavailable": True})
-        if not src.is_file():
-            return EngineResult("failed", reason="source file missing")
         log_path = None
         if log_root is not None and log_id:
             from ..jsonl import JobLogStore
@@ -118,6 +147,138 @@ class DocumentEngine:
                                 seconds=time.monotonic() - t0, log_path=log_path)
         return EngineResult("converted", output=dst, encoder=f"pandoc+{writer}",
                             seconds=time.monotonic() - t0, log_path=log_path)
+
+    # ------------------------------------------------------------- exports (A2)
+    def _export_log(self, log_id, log_root):
+        if log_root is not None and log_id:
+            from ..jsonl import JobLogStore
+            return JobLogStore(log_root).open_capture(log_id)
+        return None
+
+    def _export(self, src: Path, dst: Path, target: str, *, timeout_s: float,
+                governor, log_id, log_root, t0: float) -> EngineResult:
+        if target not in DOC_TARGETS:
+            return EngineResult("failed",
+                                reason=f"unknown document target '{target}' "
+                                       f"(supported: {', '.join(DOC_TARGETS)}, pdf)")
+        ext = src.suffix.lower()
+        ext_norm = _TARGET_EXT.get(ext, ext)
+        if ext_norm == _TARGET_AS_EXT.get(target, "." + target):
+            return EngineResult("skipped",
+                                reason=f"this file is already {target.upper()}")
+        if ext in _ZIP_SOURCES:
+            # LibreOffice would "convert" garbage bytes through its text-import
+            # fallback and call it success. A container that isn't a container
+            # is the file's own problem - say so before spending a process.
+            head = src.open("rb").read(4)
+            if not head.startswith(b"PK\x03\x04"):
+                return EngineResult("failed",
+                                    reason=f"this {ext} file is not a valid "
+                                           f"document container (corrupted or "
+                                           f"renamed?)")
+        log_path = self._export_log(log_id, log_root)
+        lo_ok = self.engines.is_available("libreoffice")
+        pan_ok = self.engines.is_available("pandoc")
+        # Markup sources go to pandoc (clean writers); office sources go to
+        # LibreOffice; everything else tries pandoc first (it reads Word/ODT/
+        # RTF/epub natively) then LibreOffice. A tool's own error IS the
+        # reason shown.
+        if ext in PANDOC_READER and pan_ok:
+            return self._pandoc_export(src, dst, target, PANDOC_READER[ext],
+                                       timeout_s=timeout_s, governor=governor,
+                                       log_path=log_path, t0=t0)
+        if target == "markdown":
+            # pandoc only; its native readers cover Word/ODT/RTF/epub.
+            if not pan_ok:
+                return EngineResult("failed", reason="Markdown output needs "
+                                                     "pandoc (not installed)",
+                                    data={"engine_unavailable": True})
+            return self._pandoc_export(src, dst, target, None,
+                                       timeout_s=timeout_s, governor=governor,
+                                       log_path=log_path, t0=t0)
+        if ext in LO_FORMAT and lo_ok:
+            return self._lo_export(src, dst, target, timeout_s=timeout_s,
+                                   governor=governor, log_path=log_path, t0=t0)
+        if pan_ok:
+            return self._pandoc_export(src, dst, target, None,
+                                       timeout_s=timeout_s, governor=governor,
+                                       log_path=log_path, t0=t0)
+        if lo_ok:
+            return self._lo_export(src, dst, target, timeout_s=timeout_s,
+                                   governor=governor, log_path=log_path, t0=t0)
+        return EngineResult("failed", reason="document conversion needs "
+                                             "LibreOffice or pandoc (neither found)",
+                            data={"engine_unavailable": True})
+
+    @staticmethod
+    def _invalid_output(path: Path, target: str) -> str | None:
+        """Reason string when the produced file is not what it claims (None = fine)."""
+        if not path.is_file() or path.stat().st_size == 0:
+            return "produced no content"
+        magic = _OUT_MAGIC.get(target)
+        if magic and not path.read_bytes()[:8].startswith(magic):
+            return f"output is not a valid {target.upper()} file"
+        return None
+
+    def _pandoc_export(self, src: Path, dst: Path, target: str,
+                       reader: str | None, *, timeout_s: float, governor,
+                       log_path, t0: float) -> EngineResult:
+        pandoc = self.engines.path("pandoc")
+        cmd = [pandoc, str(src)]
+        if reader:
+            cmd += ["-f", reader]
+        writer = PANDOC_WRITER[target]
+        cmd += ["-t", writer]
+        if target in ("rtf", "html"):
+            cmd += ["-s"]            # document targets need the full wrapper:
+        if target == "txt":          # the bare writers emit fragments
+            cmd += ["--wrap=none"]      # text means text: no artificial margins
+        cmd += ["-o", str(dst)]
+        res = run_command(cmd, timeout_s=timeout_s, log_path=log_path,
+                          governor=governor)
+        bad = self._invalid_output(dst, target)
+        if bad and res.timed_out:
+            bad = "timed out"
+        if bad:
+            dst.unlink(missing_ok=True)
+            detail = bad if bad == "timed out" else f"{bad} ({_tail(res.stderr_text)})"
+            return EngineResult("failed", reason=f"pandoc: {detail}",
+                                seconds=time.monotonic() - t0, log_path=log_path)
+        return EngineResult("converted", output=dst, encoder="pandoc",
+                            seconds=time.monotonic() - t0, log_path=log_path,
+                            data={"verified_by_engine": True,
+                                  "out_size": dst.stat().st_size})
+
+    def _lo_export(self, src: Path, dst: Path, target: str, *, timeout_s: float,
+                   governor, log_path, t0: float) -> EngineResult:
+        lo = self.engines.path("libreoffice")
+        assert lo is not None
+        with tempfile.TemporaryDirectory(prefix="transmute-lo-",
+                                         dir=str(dst.parent)) as td:
+            outdir = Path(td) / "out"
+            profile = Path(td) / "profile"
+            res = run_command([lo, "--headless", "--norestore", "--nologo",
+                               f"-env:UserInstallation=file://{profile}",
+                               "--convert-to", LO_OUT[target],
+                               "--outdir", str(outdir), str(src)],
+                              timeout_s=timeout_s, log_path=log_path,
+                              governor=governor)
+            produced = next(iter(sorted(outdir.glob("*.*"))), None)
+            if produced is not None:
+                bad = self._invalid_output(produced, target)
+            else:
+                bad = ("timed out" if res.timed_out
+                       else _tail(res.stderr_text) or "LibreOffice produced no file")
+            if bad:
+                return EngineResult("failed", reason=f"LibreOffice: {bad}",
+                                    seconds=time.monotonic() - t0,
+                                    log_path=log_path)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(produced), dst)
+        return EngineResult("converted", output=dst, encoder="libreoffice",
+                            seconds=time.monotonic() - t0, log_path=log_path,
+                            data={"verified_by_engine": True,
+                                  "out_size": dst.stat().st_size})
 
     # ------------------------------------------------------------- verify (F24)
     def verify(self, src: Path, out: Path) -> EngineResult:

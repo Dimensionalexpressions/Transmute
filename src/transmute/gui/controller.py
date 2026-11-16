@@ -29,6 +29,10 @@ REMUX_CONTAINERS = (".mkv", ".mp4", ".webm", ".ts")
 # compression: the engine routes them away from the lossless ladder.
 PDF_EXPORT = {"png (per page)": "png", "jpg (per page)": "jpg", "txt (text)": "txt"}
 
+# Document export target ids (A2) - same words engine-side and picker-side;
+# the engine reads them as its format list, so import, don't duplicate.
+from ..engines.document import DOC_TARGETS as DOC_EXPORT  # noqa: E402
+
 
 @dataclass
 class TargetInfo:
@@ -135,6 +139,8 @@ class ConverterController:
         "png (per page)": "PNG image (one file per page)",
         "jpg (per page)": "JPEG image (one file per page)",
         "txt (text)": "Plain text",
+        "docx": "DOCX (Word)", "odt": "ODT (OpenDocument)", "rtf": "RTF",
+        "html": "HTML page", "markdown": "Markdown", "txt": "Plain text",
     }
     _TAGLINE = {
         "av1": "smallest file, slowest to convert",
@@ -157,6 +163,12 @@ class ConverterController:
         "png (per page)": "exact pixels, larger",
         "jpg (per page)": "smaller page images",
         "txt (text)": "text only, images dropped",
+        "docx": "Word document",
+        "odt": "OpenDocument text",
+        "rtf": "rich text - opens everywhere",
+        "html": "web page",
+        "markdown": "plain markup text",
+        "txt": "text only, formatting dropped",
     }
     # raw encoder ids -> words a human chose on purpose (F10 ladder order kept)
     _GPU_SUFFIX = {"nvenc": "GPU - NVIDIA", "vaapi": "GPU - VA-API",
@@ -271,7 +283,11 @@ class ConverterController:
         if category == "video":
             return _SUFFIX.get(base, ".mkv")
         if category == "document":
-            return ".pdf"
+            if target == "pdf":
+                return ".pdf"
+            if target == "markdown":
+                return ".md"       # the extension humans actually use
+            return "." + target    # docx / odt / rtf / html / txt
         return "." + base
 
     def dst_for(self, src: Path | str, category: str, target: str,
@@ -383,6 +399,8 @@ class ConverterController:
                 opts["target"] = PDF_EXPORT[target]   # transform (A1), not ladder
             elif deep_pdf:
                 opts["deep"] = True   # lossy recompress - the UI must label it so
+        if category == "document" and target in DOC_EXPORT:
+            opts["target"] = target   # A2 export transform; "pdf" keeps old path
         return opts
 
     def enqueue(self, src: Path | str, dst_dir: Path | str, category: str,

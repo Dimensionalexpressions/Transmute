@@ -38,7 +38,8 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 5  # 4 -> 5: A1 adds pdf export matrix rows + pdftotext backend
+SCHEMA_VERSION = 6  # 5 -> 6: A2 adds document export matrix rows (the ONLY
+                    # cache-invalidation lever - _PROBE_SALT is dead code)
 _PROBE_SALT = "p3c"  # bump to invalidate caches when trial logic changes
 # P3/F15: the ONLY tone-map chain the video engine may use, and the one the
 # probe actually executes (measure, don't parse: a build can list zscale/tonemap
@@ -641,9 +642,11 @@ def build_matrix(rep: CapabilityReport) -> list[MatrixRow]:
                           "extracts embedded text - scanned PDFs have none (use PNG/JPEG)"))
 
     doc_paths = []
-    if rep.engines.get("libreoffice", {}).get("status") == STATUS_OK:
+    lo_ok = rep.engines.get("libreoffice", {}).get("status") == STATUS_OK
+    pan_ok = rep.engines.get("pandoc", {}).get("status") == STATUS_OK
+    if lo_ok:
         doc_paths.append(("LibreOffice", True))
-    if rep.engines.get("pandoc", {}).get("status") == STATUS_OK:
+    if pan_ok:
         doc_paths.append(("pandoc", False))
     if not doc_paths:
         rows.append(MatrixRow("document", "pdf", "LibreOffice/pandoc", False,
@@ -652,6 +655,32 @@ def build_matrix(rep: CapabilityReport) -> list[MatrixRow]:
         rows.append(MatrixRow("document", "pdf", name, available=True,
                               note="native PDF export" if direct
                               else "pandoc needs a PDF engine (LaTeX) on the system"))
+    # A2: office/markup EXPORTS. Targets stay visible with this machine's
+    # reason (F3); per-source routing happens in the engine at convert time.
+    why_none = "install LibreOffice or pandoc for document conversion"
+    rows.append(MatrixRow("document", "docx", "LibreOffice/pandoc",
+                          available=lo_ok or pan_ok,
+                          note=why_none if not (lo_ok or pan_ok) else
+                          "Word format - LibreOffice from office files, pandoc from Markdown/HTML/text"))
+    rows.append(MatrixRow("document", "odt", "LibreOffice/pandoc",
+                          available=lo_ok or pan_ok,
+                          note=why_none if not (lo_ok or pan_ok) else
+                          "OpenDocument text - office sources need LibreOffice"))
+    rows.append(MatrixRow("document", "rtf", "LibreOffice/pandoc",
+                          available=lo_ok or pan_ok,
+                          note=why_none if not (lo_ok or pan_ok) else
+                          "rich text - opens in almost every word processor"))
+    rows.append(MatrixRow("document", "html", "LibreOffice/pandoc",
+                          available=lo_ok or pan_ok,
+                          note=why_none if not (lo_ok or pan_ok) else
+                          "web page - either tool converts markup; office files need LibreOffice"))
+    rows.append(MatrixRow("document", "markdown", "pandoc", available=pan_ok,
+                          note="pandoc not found on this machine" if not pan_ok else
+                          "plain Markdown text - pandoc reads Word/ODT/HTML too"))
+    rows.append(MatrixRow("document", "txt", "LibreOffice/pandoc",
+                          available=lo_ok or pan_ok,
+                          note=why_none if not (lo_ok or pan_ok) else
+                          "plain text - formatting is dropped"))
     return rows
 
 

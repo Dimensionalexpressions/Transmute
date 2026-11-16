@@ -206,6 +206,109 @@ class ConverterController:
         return any(t in reason for t in ("Terminating thread", "@ 0x",
                                          "vost#", "Stream mapping"))
 
+    # -------------------------------------------------- plain-language layer
+    # One honest sentence a person who has never heard of codecs can act on.
+    _ABOUT = {
+        "h264": "The safe choice: almost every screen, phone, and website made "
+                "in the last 15 years plays it. Medium size.",
+        "hevc": "About 30% smaller than H.264 with the same quality. Recent "
+                "iPhones, Androids and TVs play it; older apps may not. ℹ️",
+        "av1": "Smallest files - best for archiving and slow connections. "
+               "Needs fairly new devices to play it.",
+        "vp9": "The free web format - smaller than H.264. Browsers and Android "
+               "play it; most TVs and iPhones do not.",
+        "vp8": "Older web format. For new files prefer VP9 or AV1.",
+        "mp3": "Works on literally any player ever built. Fine for music.",
+        "aac": "The standard for phone ringtones, video soundtracks, and "
+               "streaming.",
+        "opus": "Best quality for its size - what Discord and WhatsApp use. "
+                "Needs modern apps.",
+        "flac": "Exact copy of the original audio, compressed losslessly. "
+                "Large; some players ignore its tags.",
+        "alac": "Apple's lossless - for iPhone and Apple Music.",
+        "vorbis": "Older Ogg audio. Prefer Opus for new files.",
+        "jpeg": "Classic photo - small, opens everywhere.",
+        "png": "Pixel-perfect, no compression artifacts. Larger files.",
+        "webp": "Much smaller than JPEG, opens in almost every current app.",
+        "avif": "Newest and smallest photo format; needs recent apps.",
+    }
+
+    def _vaapi_word(self) -> str:
+        """Which GPU sits behind /dev/dri VAAPI nodes - read from /sys now,
+        never assumed at build time."""
+        cached = getattr(self, "_vaapi_cache", None)
+        if cached is not None:
+            return cached
+        drivers = set()
+        try:
+            import glob
+            import os
+            for p in glob.glob("/sys/class/drm/renderD*/device/driver"):
+                drivers.add(os.path.basename(os.path.realpath(p)))
+        except OSError:
+            pass
+        if "amdgpu" in drivers:
+            w = "the AMD graphics built into your CPU"
+        elif drivers & {"i915", "xe"}:
+            w = "the Intel graphics built into your CPU"
+        else:
+            w = "your GPU (via VA-API)"
+        self._vaapi_cache = w
+        return w
+
+    def _device_word(self, enc) -> str:
+        if enc.backend == "nvidia-nvenc":
+            return "your NVIDIA graphics card"
+        if enc.backend == "va-api":
+            return self._vaapi_word()
+        if enc.backend == "intel-oneapi":
+            return "Intel Quick Sync"
+        if enc.backend == "amd-amf":
+            return "AMD graphics (AMF)"
+        return "your CPU"
+
+    def about_lines(self, category: str, target: str,
+                    encoder: str = "") -> list[str]:
+        """What the picker shows under the choice: what you get, and how fast
+        each path actually ran on THIS machine (measured trials, F10 data -
+        never estimates)."""
+        lines: list[str] = []
+        text = self._ABOUT.get(target)
+        if text:
+            lines.append(text)
+        base = target.split(" ")[0]
+        tried = [e for e in getattr(self.report, "encoders", [])
+                 if e.verified and e.fps and (e.codec == base
+                                              or e.name == base)]
+        if tried:
+            tried.sort(key=lambda e: -e.fps)
+            # one line per DEVICE (fastest encoder of it), not per raw
+            # encoder: "your CPU" twice with different numbers confuses.
+            per_dev: dict[str, object] = {}
+            for e in tried:
+                per_dev.setdefault(self._device_word(e), e)
+            devs = list(per_dev.values())
+            best = devs[0]
+            if encoder:
+                sel = next((e for e in tried
+                            if e.name == encoder.rsplit("/", 1)[-1]), None)
+                if sel is not None:
+                    lines.append(
+                        f"Selected {self._device_word(sel)} - measured "
+                        f"{sel.fps:.0f} fps on the benchmark clip.")
+            if len(devs) > 1:
+                lines.append(
+                    f"Fastest here: {self._device_word(best)} "
+                    f"({best.fps:.0f} fps). Also works: "
+                    + ", ".join(f"{self._device_word(e)} {e.fps:.0f}"
+                                for e in devs[1:]) + " fps.")
+            else:
+                lines.append(f"Measured here: {best.fps:.0f} fps - "
+                             f"{self._device_word(best)}.")
+            lines.append("Speed is measured by test-encoding, never guessed; "
+                         "the live timer replaces it while converting.")
+        return lines
+
     def targets(self, category: str) -> list[TargetInfo]:
         """One row per conversion target, available and not (F3: greyed rows
         stay visible and say WHY in the label itself, full machine reasons in
@@ -231,9 +334,10 @@ class ConverterController:
                    or self._garbled(r.note) else f": {r.note}")
                 for r in rows)
             if available:
+                # Simplified per user feedback: the label is just format +
+                # short hint; hardware/performance details go to the details
+                # block (about_lines), not crammed into the option text.
                 label = f"{pretty} - {tagline}" if tagline else pretty
-                if any(r.hw for r in live):
-                    label += " · GPU-accelerated here"
                 if any(r.compat_flag for r in live):
                     label += "  ℹ️"
                 elif any(r.recommended for r in live):

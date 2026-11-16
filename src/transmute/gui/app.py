@@ -142,6 +142,15 @@ class MainWindow(QMainWindow):
         self.tgt_box = QComboBox()
         self.tgt_box.currentIndexChanged.connect(self._load_encoders)
         rv.addRow("Target", self.tgt_box)
+        # plain-language details for the chosen target (what you get, measured
+        # speed per device on THIS machine). User feedback: options stay
+        # simple; details live here, not crammed into the option text.
+        self.lbl_about = QLabel("")
+        self.lbl_about.setWordWrap(True)
+        self.lbl_about.setStyleSheet("color:#39706a;"
+                                     "background:#eef6f5;border-radius:6px;"
+                                     "padding:6px 8px;")
+        rv.addRow(self.lbl_about)
         self.enc_box = QComboBox()
         self.enc_box.currentIndexChanged.connect(
             lambda *_: (self._update_enc_note(),
@@ -205,6 +214,7 @@ class MainWindow(QMainWindow):
         # QFormLayout.addRow returns no row index in PySide6 - derive them
         # by scanning the form once (cheap, fixed set).
         self._row = {
+            "about": self._row_of(self.lbl_about),
             "enc": self._row_of(self.enc_box),
             "remux": self._row_of(self.chk_remux),
             "remux_into": self._row_of(self.remux_box),
@@ -355,11 +365,28 @@ class MainWindow(QMainWindow):
         self._update_enc_note()
         self._sync_options_enabled()
 
+    def _update_about(self) -> None:
+        """Details block: what the chosen target means in plain words + the
+        machine's MEASURED speeds (from the probe's trial encodes)."""
+        cat = self.cat_box.currentText()
+        if not hasattr(self, "lbl_about") or not hasattr(self, "_row"):
+            return  # construction order: first addItems fires before panels exist
+        target = self._current_target()
+        tinfo = self._target_info(cat, target) if target else None
+        lines = []
+        if tinfo is not None and tinfo.available:
+            lines = self.ctrl.about_lines(
+                cat, target, self.enc_box.currentData() or "")
+        self.lbl_about.setText("\n".join(lines))
+        self.lbl_about.setVisible(bool(lines))
+        self._toggle_row(self._row["about"], bool(lines))
+
     def _update_enc_note(self) -> None:
         """Human words for what the encoder choice MEANS; raw engine ids go
         to the tooltip. (Live-test finding: 'ffmpeg/libaom-av1' shown next
         to 'auto' meant nothing AND implied a false promise - auto follows
         the verified ladder, not the static matrix row.)"""
+        self._update_about()
         cat = self.cat_box.currentText()
         target = self._current_target()
         tinfo = self._target_info(cat, target) if target else None

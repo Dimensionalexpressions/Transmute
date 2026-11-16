@@ -79,5 +79,25 @@ Rows never lie: `available=False` always carries a `note`/reason, and
    offered as the explicit `deep=True` rung and the UI must label it so.
 4. **Trial fps are 1-second micro-benchmarks**: right for *ranking*
    encoders, not predictions of throughput on real media.
-5. qpdf/pandoc are absent on the dev bench; their ladder behaviour is
-   proven by simulation tests, real-engine coverage lands in P5 CI matrix.
+5. qpdf/pandoc were absent on the early dev bench (ladder proven by simulation
+   tests); both are now installed on the bench (qpdf 12.4.2, pandoc 3.11) and
+   their real-engine tests run in the full suite.
+
+## F. UI doctrine (user references + first live-test feedback, 2026-11)
+
+Design references named by the user at kickoff: **Movavi Video Converter**
+(https://www.movavi.com/video-converter/) merged with **VideoProc Converter**
+(https://www.videoproc.com/) - consumer-grade clarity: what a choice *does*
+for you, not how the engine spells it internally.
+
+From the first live Linux test (user-reported):
+1. Never surface raw backend rows or tool names as UI text: one row per
+   target with a plain-language tradeoff ("AV1 - smallest file, slowest to
+   convert"); encoder ids live in tooltips/logs only.
+2. Greyed = greyed *with the reason in the label*, the machine's own words
+   (extends F3; tooltips alone were declared invisible by real users).
+3. File dialogs must re-enumerate mounts every time they open (no stale
+   drive entries from cached native dialogs).
+4. Watch-folders/auto-convert is a first-class GUI feature, not CLI-only.
+5. Zero-hype labels survive redesign: friendly words, but still only what
+   this machine has *proven* it can do (F1/F3 stay binding).

@@ -259,7 +259,9 @@ def _is_plain_file(st: os.stat_result) -> bool:
 
 
 # ----------------------------------------------------------------- headless CLI
-def make_queue_callback(ctrl) -> Callable[[WatchFolder, Path], None]:
+def make_queue_callback(ctrl,
+                        note: Callable[[str], None] | None = None
+                        ) -> Callable[[WatchFolder, Path], None]:
     """Wire settled files to a controller (duck-typed: `default_target`,
     `enqueue`) so they land in its JobQueue with tree-mirrored destinations.
 
@@ -267,13 +269,20 @@ def make_queue_callback(ctrl) -> Callable[[WatchFolder, Path], None]:
     TRANSMUTE_ROOT override — so F25 portable mode flows through watching with
     zero extra plumbing. Unsupported or unconvertible files print an honest
     skip reason (F3/F26); nothing is queued blindly.
+
+    `note`, when given, receives the same human line that is logged, for the
+    GUI's watch panel (one line per settle, queued or skipped). Logging stays
+    the source of truth; note must not raise (callers own their display).
     """
     def on_settled(folder: WatchFolder, path: Path) -> None:
         cat = category_of(path)
         tgt = ctrl.default_target(cat) if cat else None
         if tgt is None or not tgt.available:
             reason = tgt.reason if tgt is not None else "unsupported file type"
+            line = f"skipped {path.name}: {reason}"
             log.info("watch skip %s: %s", path.name, reason)
+            if note is not None:
+                note(line)
             return
         # F25 tree mirroring: keep the drop's subfolder under the dst root, so
         # inbox/sub/x.mp4 -> dst/sub/x.<target>. (dst_for keeps only the stem.)
@@ -282,8 +291,10 @@ def make_queue_callback(ctrl) -> Callable[[WatchFolder, Path], None]:
         except ValueError:
             rel = Path(".")
         info = ctrl.enqueue(path, folder.dst / rel, cat, tgt.target)
-        log.info("watch queued %s -> %s (%s/%s)", path.name,
-                 Path(info.dst).name, cat, tgt.target)
+        line = f"queued {path.name} → {Path(info.dst).name} ({cat}/{tgt.target})"
+        log.info("watch %s", line)
+        if note is not None:
+            note(line)
     return on_settled
 
 

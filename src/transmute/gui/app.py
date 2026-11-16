@@ -7,6 +7,7 @@ targets show ℹ️ (F14); HDR sources get an explicit warning (F15).
 """
 from __future__ import annotations
 
+import queue as pyqueue
 import sys
 import threading
 from pathlib import Path
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from .controller import REMUX_CONTAINERS, ConverterController
+from ..watch import make_queue_callback
 
 
 class MainWindow(QMainWindow):
@@ -33,6 +35,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ctrl = controller or ConverterController()
         self._worker: threading.Thread | None = None
+        # watch-folders state (F24): the watcher thread only posts text lines
+        # into the SimpleQueue; everything else happens on the GUI thread.
+        self._watcher = None                     # FolderWatcher, lazy
+        self._watch_rules: list[tuple[Path, Path]] = []
+        self._watch_events: pyqueue.SimpleQueue[str] = pyqueue.SimpleQueue()
+        self._watch_more = False                 # watch jobs await a worker
         self.run_done.connect(self._on_worker_done)
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
@@ -42,6 +50,10 @@ class MainWindow(QMainWindow):
         self._poll.setInterval(400)
         self._poll.timeout.connect(self.refresh_queue)
         self._poll.start()
+        self._wpoll = QTimer(self)
+        self._wpoll.setInterval(500)
+        self._wpoll.timeout.connect(self._drain_watch)
+        self._wpoll.start()
         self.refresh_queue()
 
     # ------------------------------------------------------------- layout
@@ -92,6 +104,31 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.lbl_prev)
         self.files.currentItemChanged.connect(
             lambda *_: self.btn_prev.setEnabled(self._current_file_is_video()))
+
+        # ---- watch folders (F24 in the GUI): the watcher decides NOTHING -
+        # it hands settled files over; controller/queue policy stays central.
+        wbox = QGroupBox("Watch folders (auto-convert on drop)")
+        wv = QVBoxLayout(wbox)
+        self.watch_list = QListWidget()
+        self.watch_list.setMaximumHeight(64)
+        wv.addWidget(self.watch_list)
+        self.watch_log = QListWidget()
+        self.watch_log.setMaximumHeight(56)
+        self.watch_log.setEnabled(False)  # history view; clicks do nothing
+        wv.addWidget(self.watch_log)
+        wrow = QHBoxLayout()
+        self.btn_watch = QPushButton("Watch folder…")
+        self.btn_watch.clicked.connect(self._watch_add_dialog)
+        self.btn_unwatch = QPushButton("Remove selected")
+        self.btn_unwatch.clicked.connect(self._watch_remove_selected)
+        wrow.addWidget(self.btn_watch)
+        wrow.addWidget(self.btn_unwatch)
+        wrow.addStretch(1)
+        wv.addLayout(wrow)
+        self.lbl_watch = QLabel("no watch folders")
+        self.lbl_watch.setWordWrap(True)
+        wv.addWidget(self.lbl_watch)
+        lv.addWidget(wbox)
         splitter.addWidget(left)
 
         # right: what this machine can do, chosen from the probed matrix
@@ -203,8 +240,12 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- slots
     def _add_dialog(self) -> None:
+        # NON-native by deliberate choice: Qt's own dialog enumerates mounts
+        # when it opens, so a drive plugged in since launch appears (the KDE
+        # native dialog served a stale cached bookmark - real user, 2026-11).
         names, _ = QFileDialog.getOpenFileNames(
-            self, "Add files", str(Path.home()))
+            self, "Add files", str(Path.home()),
+            options=QFileDialog.Option.DontUseNativeDialog)
         for n in names:
             self._add_one(Path(n))
 
@@ -232,8 +273,9 @@ class MainWindow(QMainWindow):
         self._update_remux_status()
 
     def _choose_dst(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Destination",
-                                             self.dst_edit.text() or str(Path.home()))
+        d = QFileDialog.getExistingDirectory(
+            self, "Destination", self.dst_edit.text() or str(Path.home()),
+            options=QFileDialog.Option.DontUseNativeDialog)
         if d:
             self.dst_edit.setText(d)
 
@@ -266,14 +308,17 @@ class MainWindow(QMainWindow):
             # from QListWidgetItem.setData(role, value) above.
             item.setData(t.target, Qt.ItemDataRole.UserRole)
             if not t.available:
-                # disabled but VISIBLE: the reason must be readable (F3)
+                # disabled but VISIBLE: the reason is IN the label (real-user
+                # feedback: tooltip-only reasons go unnoticed) - F3 honoured,
+                # full machine words in the tooltip.
                 item.setEnabled(False)
-                item.setToolTip(t.reason)
+                item.setToolTip((t.reason + "\n\n" + t.detail).strip())
             elif t.compat_flag:
                 item.setToolTip("Patent/royalty-encumbered codec; offered only "
-                                "because this machine can encode it (F14).")
+                                "because this machine can encode it (F14).\n"
+                                + t.detail)
             else:
-                item.setToolTip(t.note)
+                item.setToolTip(t.detail or t.note)
         self._load_encoders(0)
 
     def _load_encoders(self, _idx: int) -> None:
@@ -284,8 +329,10 @@ class MainWindow(QMainWindow):
             return
         ladder = self.ctrl.encoders(cat, target)
         if ladder:
-            self.enc_box.addItem("auto (fastest verified)")
-            self.enc_box.addItems(ladder)
+            # raw encoder ids become item DATA; users see human words only
+            self.enc_box.addItem("auto (fastest verified)", "")
+            for enc in ladder:
+                self.enc_box.addItem(self.ctrl.human_encoder(enc), enc)
         self.enc_box.setEnabled(bool(ladder))
         tinfo = self._target_info(cat, target) if target else None
         note = ""
@@ -417,8 +464,7 @@ class MainWindow(QMainWindow):
         if not target:
             self.lbl_status.setText("No target selected (none available?).")
             return
-        enc = self.enc_box.currentText() if self.enc_box.isEnabled() else ""
-        enc = None if enc.startswith("auto") or not enc else enc
+        enc = (self.enc_box.currentData() or None) if self.enc_box.isEnabled() else None
         # P3 controls map 1:1 onto controller kwargs; the controller (not the
         # widgets) decides what they mean, incl. CRF-vs-size exclusivity.
         kw: dict = dict(encoder=enc, quality=self.quality.value(),
@@ -455,6 +501,9 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(
                 "Nothing to do - no listed file matches this category.")
             return
+        self._start_worker()
+
+    def _start_worker(self) -> None:
         self.btn_run.setEnabled(False)
         self.bar.setVisible(True)
         self._worker = threading.Thread(target=self._worker_body, daemon=True)
@@ -471,6 +520,9 @@ class MainWindow(QMainWindow):
     def _on_worker_done(self) -> None:
         self.btn_run.setEnabled(True)
         self.bar.setVisible(False)
+        # jobs that landed from a watch folder DURING this run need a fresh
+        # pass (queue.run snapshots eligible once) - pump now, not in 500ms
+        self._drain_watch()
 
     def refresh_queue(self) -> None:
         rows = self.ctrl.snapshot()
@@ -482,8 +534,13 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 1, QTableWidgetItem(Path(r.dst).name))
             st = QTableWidgetItem(r.state)
             self.table.setItem(i, 2, st)
-            detail = r.reason or r.encoder
-            self.table.setItem(i, 3, QTableWidgetItem(detail))
+            # human words in the table, raw tool ids in the tooltip (SPEC F.1)
+            detail = r.reason or (self.ctrl.human_encoder(r.encoder)
+                                  if r.encoder else "")
+            item = QTableWidgetItem(detail)
+            if r.reason and r.encoder:
+                item.setToolTip(f"encoder: {r.encoder}")
+            self.table.setItem(i, 3, item)
         self.lbl_status.setText(
             f"{done}/{len(rows)} settled" if rows else "queue empty")
 
@@ -509,6 +566,102 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(
             f"Cancelled {n} job(s) (shown as cancelled by user) — in-flight "
             f"jobs still finish.")
+
+    # --------------------------------------------------------- watch folders
+    def _watch_add_dialog(self) -> None:
+        opts = QFileDialog.Option.DontUseNativeDialog  # fresh mounts (SPEC F.3)
+        src = QFileDialog.getExistingDirectory(
+            self, "Folder to watch (new files get converted)",
+            str(Path.home()), options=opts)
+        if not src:
+            return
+        dst = QFileDialog.getExistingDirectory(
+            self, "Where converted files go (must be a different tree)",
+            src, options=opts)
+        if not dst:
+            return
+        self._watch_add(Path(src), Path(dst))
+
+    def _watch_add(self, src: Path, dst: Path) -> None:
+        try:
+            if self._watcher is None:
+                w = self._new_watcher()
+                w.add_folder(src, dst)  # schedule BEFORE start (live API)
+                w.start()
+                self._watcher = w  # assign only once fully valid (F3: a
+            else:                  # rejected rule must not leave a dead watcher)
+                self._watcher.add_folder(src, dst)  # live-scheduled
+            self._watch_rules.append((src, dst))
+        except (ValueError, RuntimeError) as exc:
+            # honest refusal (dst==src, nested trees, not a dir): say it, keep
+            # the existing watcher running (F3)
+            self.lbl_watch.setText("⚠ " + str(exc))
+            return
+        self._sync_watch_list()
+        self.lbl_watch.setText(
+            f"watching {len(self._watch_rules)} folder(s) — drops are queued "
+            "and converted automatically with default quality")
+
+    def _new_watcher(self):
+        from ..watch import FolderWatcher
+        return FolderWatcher(on_settled=make_queue_callback(
+            self.ctrl, note=self._watch_note))
+
+    def _watch_note(self, line: str) -> None:
+        # watcher-thread door: ONLY touch the SimpleQueue here
+        self._watch_events.put(line)
+
+    def _watch_remove_selected(self) -> None:
+        row = self.watch_list.currentRow()
+        if row < 0 or row >= len(self._watch_rules):
+            return
+        self._watch_rules.pop(row)
+        old, self._watcher = self._watcher, None
+        if old is not None:
+            old.stop()
+        # watchdog gives no un-schedule; rebuild the watcher from remaining
+        # rules (cheap: folders only, no state to lose - jobs are journalled)
+        if self._watch_rules:
+            w = self._new_watcher()
+            for src, dst in self._watch_rules:
+                w.add_folder(src, dst)  # same rules already validated once
+            w.start()
+            self._watcher = w
+        self._sync_watch_list()
+        self.lbl_watch.setText(
+            f"watching {len(self._watch_rules)} folder(s)" if self._watch_rules
+            else "no watch folders")
+
+    def _sync_watch_list(self) -> None:
+        self.watch_list.clear()
+        for src, dst in self._watch_rules:
+            self.watch_list.addItem(f"{src}  →  {dst}")
+
+    def _drain_watch(self) -> None:
+        lines = []
+        while not self._watch_events.empty():
+            lines.append(self._watch_events.get())
+        for line in lines[-25:]:  # bounded history; the log has it all (F26)
+            self.watch_log.addItem(line)
+            self.watch_log.scrollToBottom()
+            if line.startswith("queued"):
+                self._watch_more = True
+        if self._watch_more:
+            self._pump_watch_jobs()
+
+    def _pump_watch_jobs(self) -> None:
+        """Watch-queued jobs need their own worker pass: JobQueue.run()
+        snapshots eligible jobs once, so anything enqueued mid-run must be
+        picked up by a fresh run when the worker is idle again."""
+        if not self._watch_more or (self._worker and self._worker.is_alive()):
+            return
+        self._watch_more = False
+        self._start_worker()
+
+    def closeEvent(self, event):  # noqa: N802
+        if self._watcher is not None:
+            self._watcher.stop()  # joins observer + poll threads (daemons too)
+        super().closeEvent(event)
 
     # ------------------------------------------------------------- drops
     def dropEvent(self, event):  # noqa: N802

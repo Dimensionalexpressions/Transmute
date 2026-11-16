@@ -74,11 +74,14 @@ class TestPickersMirrorTheReport:
         window.cat_box.setCurrentText("video")
         labels = [_model_item(window.tgt_box, i).text()
                   for i in range(window.tgt_box.count())]
-        assert any("hevc" in l for l in labels)      # NOT hidden (F3)
+        assert any("hevc" in l.lower() for l in labels)   # NOT hidden (F3)
         idx = next(i for i in range(window.tgt_box.count())
-                   if "hevc" in _model_item(window.tgt_box, i).text())
+                   if "hevc" in _model_item(window.tgt_box, i).text().lower())
         it = _model_item(window.tgt_box, idx)
         assert not (it.flags() & Qt.ItemFlag.ItemIsEnabled)
+        # the WHY is now in the LABEL itself (real-user feedback, SPEC F.2);
+        # the machine's full words stay in the tooltip
+        assert "not available here" in it.text().lower()
         assert "trial encode failed" in it.toolTip()
 
     def test_first_available_selected_by_default(self, window):
@@ -89,10 +92,14 @@ class TestPickersMirrorTheReport:
 
     def test_encoder_ladder_populated_fastest_first(self, window):
         window.cat_box.setCurrentText("video")
-        # av1 is row 0 and enabled
-        encs = [window.enc_box.itemText(i)
-                for i in range(window.enc_box.count())]
-        assert encs == ["auto (fastest verified)", "libsvtav1", "libaom-av1"]
+        # av1 is row 0 and enabled. Raw ids ride as item DATA (engine
+        # contract); the visible text is human words (SPEC F.1).
+        assert [window.enc_box.itemData(i)
+                for i in range(window.enc_box.count())] == \
+            ["", "libsvtav1", "libaom-av1"]
+        assert window.enc_box.itemText(0) == "auto (fastest verified)"
+        assert window.enc_box.itemText(1) == "SVT-AV1 - fast AV1"
+        assert "libsvtav1" not in window.enc_box.itemText(1)
 
     def test_no_ladder_for_image_targets(self, window):
         window.cat_box.setCurrentText("image")
@@ -101,9 +108,9 @@ class TestPickersMirrorTheReport:
 
     def test_badges_render_in_labels(self, window):
         window.cat_box.setCurrentText("video")
-        texts = [_model_item(window.tgt_box, i).text()
+        texts = [_model_item(window.tgt_box, i).text().lower()
                  for i in range(window.tgt_box.count())]
-        assert any("h264" in t and "ℹ️" in t for t in texts)  # F14
+        assert any("h.264" in t and "ℹ️" in t for t in texts)  # F14
         assert any("av1" in t and "✓" in t for t in texts)
 
 

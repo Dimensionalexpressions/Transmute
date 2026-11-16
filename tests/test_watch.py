@@ -290,6 +290,25 @@ def _info(dst):
     return SimpleNamespace(dst=dst)
 
 
+def test_queue_callback_note_reports_queued_and_skipped(tmp_path):
+    """GUI watch panel feed: one human line per settle, queued or skipped
+    (the watcher thread hands these to the app via a SimpleQueue - the note
+    must never raise and must never be silent)."""
+    q = JobQueue.__new__(JobQueue)
+    calls = []
+    q.add = lambda *a, **k: calls.append(a) or _info(a[1])
+    lines = []
+    cb = make_queue_callback(_QueueCtrl(q), note=lines.append)
+    cb(WatchFolder(tmp_path, tmp_path / "out"), tmp_path / "a" / "movie.mp4")
+    assert lines == ["queued movie.mp4 → movie.av1 (video/av1)"]
+    skip = make_queue_callback(_SkipCtrl(q), note=lines.append)
+    skip(WatchFolder(tmp_path, tmp_path / "out"), tmp_path / "x" / "raw.xyz")
+    assert lines[1].startswith("skipped raw.xyz:")
+    # note=None keeps old behaviour: no crash, logging only
+    make_queue_callback(_QueueCtrl(q))(
+        WatchFolder(tmp_path, tmp_path / "out"), tmp_path / "y" / "m.mp4")
+
+
 def test_watcher_to_journal_end_to_end(tmp_path):
     """Gate-adjacent: a real drop travels watcher -> JobQueue -> journal files
     under the (portable-overridable) app root — nothing is queued in memory only."""

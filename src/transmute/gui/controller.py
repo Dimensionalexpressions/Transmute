@@ -38,6 +38,7 @@ class TargetInfo:
     recommended: bool
     hw: bool
     note: str                  # short provenance (engine chain, measured)
+    detail: str = ""           # per-backend tooltip lines (merged backends)
 
     @property
     def enabled(self) -> bool:
@@ -115,30 +116,122 @@ class ConverterController:
     def categories() -> list[str]:
         return ["video", "audio", "image", "pdf", "document"]
 
-    def targets(self, category: str) -> list[TargetInfo]:
-        """Every matrix row for the category, available and not.
+    # ------------------------------------------------------- human UI copy
+    # The matrix is per ENCODER BACKEND (8 rows say "av1"); the picker shows
+    # one row per TARGET and says in words what choosing it means. Names here
+    # are UI copy only - capability itself stays 100% measured (F1/F3).
+    _PRETTY = {
+        "av1": "AV1", "vp9": "VP9", "vp8": "VP8",
+        "h264": "H.264", "hevc": "H.265/HEVC",
+        "opus": "Opus", "mp3": "MP3", "aac": "AAC", "flac": "FLAC",
+        "alac": "ALAC", "vorbis": "Vorbis",
+        "webp": "WebP", "webp(animated)": "WebP (animated)",
+        "avif": "AVIF", "png": "PNG", "jpeg": "JPEG",
+    }
+    _TAGLINE = {
+        "av1": "smallest file, slowest to convert",
+        "vp9": "good for web, slower",
+        "vp8": "older web format",
+        "h264": "plays on almost every device",
+        "hevc": "smaller than H.264, some apps can't play it",
+        "opus": "best quality for its size",
+        "mp3": "works everywhere, older",
+        "aac": "standard for phones and video",
+        "flac": "lossless - exact audio, larger",
+        "alac": "Apple lossless (iPhone/Music)",
+        "vorbis": "older Ogg format audio",
+        "webp": "much smaller than JPEG",
+        "webp(animated)": "keeps GIF motion and loop count",
+        "avif": "newest and smallest, needs recent apps",
+        "png": "lossless, exact pixels",
+        "jpeg": "classic photo format",
+    }
+    # raw encoder ids -> words a human chose on purpose (F10 ladder order kept)
+    _GPU_SUFFIX = {"nvenc": "GPU - NVIDIA", "vaapi": "GPU - VA-API",
+                   "qsv": "GPU - Intel QSV", "videotoolbox": "GPU - macOS",
+                   "v4l2m2m": "GPU - V4L2", "vulkan": "GPU - Vulkan"}
+    _ENC_HUMAN = {
+        "libaom-av1": "AOM reference - smallest, slowest",
+        "libsvtav1": "SVT-AV1 - fast AV1",
+        "librav1e": "Rav1e - balanced",
+        "libvpx-vp9": "VP9 reference",
+        "libvpx": "VP8 reference",
+        "libx264": "x264 - proven CPU encoder",
+        "libx264rgb": "x264 lossless RGB",
+        "libx265": "x265 - CPU encoder",
+        "libmp3lame": "LAME MP3",
+        "libopus": "Opus",
+        "libvorbis": "Vorbis",
+        "aac": "AAC (FFmpeg built-in)",
+        "flac": "FLAC (FFmpeg built-in)",
+        "alac": "ALAC (FFmpeg built-in)",
+    }
 
-        Unavailable rows carry a human reason so the picker greys them out
-        with a tooltip instead of silently hiding options (F3).
+    @classmethod
+    def human_encoder(cls, name: str) -> str:
+        """Friendly words for an encoder id; the raw id stays in logs/tooltips."""
+        for suffix, who in cls._GPU_SUFFIX.items():
+            if name.endswith(suffix):
+                return f"{who} {name[:-(len(suffix) + 1)]}"
+        return cls._ENC_HUMAN.get(name, name)
+
+    @staticmethod
+    def _garbled(reason: str) -> bool:
+        """ffmpeg stderr noise masquerading as a reason is still the machine's
+        own failure text (F3) - too raw for a label, kept in the tooltip."""
+        return any(t in reason for t in ("Terminating thread", "@ 0x",
+                                         "vost#", "Stream mapping"))
+
+    def targets(self, category: str) -> list[TargetInfo]:
+        """One row per conversion target, available and not (F3: greyed rows
+        stay visible and say WHY in the label itself, full machine reasons in
+        the tooltip). Multiple encoder backends for one codec merge into the
+        one row the user actually cares about.
         """
-        out: list[TargetInfo] = []
+        groups: dict[str, list] = {}
         for row in self.report.matrix:
             if row.category != category:
                 continue
             if "verify renders" in row.target:   # diagnostic, not a target
                 continue
-            label = row.target
-            if row.compat_flag:
-                label += "  ℹ️"
-            elif row.recommended and row.available:
-                label += "  ✓"
-            reason = "" if row.available else (
-                row.note or f"not available on this machine ({row.path})")
-            out.append(TargetInfo(target=row.target, label=label,
-                                  available=row.available, reason=reason,
-                                  compat_flag=row.compat_flag,
-                                  recommended=row.recommended, hw=row.hw,
-                                  note=row.path))
+            groups.setdefault(row.target, []).append(row)
+        out: list[TargetInfo] = []
+        for target, rows in groups.items():
+            live = [r for r in rows if r.available]
+            available = bool(live)
+            pretty = self._PRETTY.get(target, target.upper())
+            tagline = self._TAGLINE.get(target)
+            detail = "\n".join(
+                f"{'✓' if r.available else '✗'} {r.path or r.note or 'backend'}"
+                + ("" if r.available or not (r.note or "")
+                   or self._garbled(r.note) else f": {r.note}")
+                for r in rows)
+            if available:
+                label = f"{pretty} - {tagline}" if tagline else pretty
+                if any(r.hw for r in live):
+                    label += " · GPU-accelerated here"
+                if any(r.compat_flag for r in live):
+                    label += "  ℹ️"
+                elif any(r.recommended for r in live):
+                    label += "  ✓"
+                reason = ""
+            else:
+                raw = [r.note or r.path for r in rows if (r.note or r.path)]
+                clean = next((x for x in raw if not self._garbled(x)), "")
+                short = clean.splitlines()[0][:60] if clean else \
+                    "no working encoder found"
+                label = f"{pretty} - not available here ({short})"
+                if any(r.compat_flag for r in rows):
+                    label += "  ℹ️"
+                reason = "; ".join(dict.fromkeys(raw)) or \
+                    "not available on this machine"
+            first = rows[0]
+            out.append(TargetInfo(target=target, label=label,
+                                  available=available, reason=reason,
+                                  compat_flag=any(r.compat_flag for r in rows),
+                                  recommended=any(r.recommended for r in live),
+                                  hw=any(r.hw for r in live),
+                                  note=first.path, detail=detail))
         return out
 
     def default_target(self, category: str) -> TargetInfo | None:

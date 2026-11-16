@@ -38,7 +38,7 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5  # 4 -> 5: A1 adds pdf export matrix rows + pdftotext backend
 _PROBE_SALT = "p3c"  # bump to invalidate caches when trial logic changes
 # P3/F15: the ONLY tone-map chain the video engine may use, and the one the
 # probe actually executes (measure, don't parse: a build can list zscale/tonemap
@@ -526,6 +526,7 @@ class CapabilityProber:
             "qpdf": engines.get("qpdf") and engines["qpdf"].status == STATUS_OK,
             "ghostscript": engines.get("gs") and engines["gs"].status == STATUS_OK,
             "pdftoppm": engines.get("pdftoppm") and engines["pdftoppm"].status == STATUS_OK,
+            "pdftotext": engines.get("pdftotext") and engines["pdftotext"].status == STATUS_OK,
         }
         rep = CapabilityReport(
             schema=SCHEMA_VERSION, probe_key=key, generated_at=time.time(),
@@ -546,7 +547,8 @@ class CapabilityProber:
 
 
 KNOWN_OPTIONAL: dict[str, bool] = {"ffmpeg": False, "ffprobe": False, "qpdf": True,
-                                   "gs": True, "pdftoppm": True, "libreoffice": True,
+                                   "gs": True, "pdftoppm": True, "pdftotext": True,
+                                   "libreoffice": True,
                                    "pandoc": True}
 
 
@@ -624,6 +626,19 @@ def build_matrix(rep: CapabilityReport) -> list[MatrixRow]:
     if not verify_ok:
         rows.append(MatrixRow("pdf", "pdf (verify renders)", "pdftoppm", False,
                               note="install poppler (pdftoppm) for pixel-level verification"))
+    # Export TRANSFORMS (not compression): poppler renders/extracts exactly what
+    # the file contains. Availability still comes only from the live probe (F3).
+    ppm_ok = bool(rep.pdf_backends.get("pdftoppm"))
+    why_ppm = "" if ppm_ok else "pdftoppm (poppler-utils) not found on this machine"
+    rows.append(MatrixRow("pdf", "png (per page)", "pdftoppm", available=ppm_ok,
+                          note=why_ppm or "renders each page exactly as a PDF viewer shows it"))
+    rows.append(MatrixRow("pdf", "jpg (per page)", "pdftoppm", available=ppm_ok,
+                          note=why_ppm or "smaller page images (JPEG quality trade-in)"))
+    txt_ok = bool(rep.pdf_backends.get("pdftotext"))
+    rows.append(MatrixRow("pdf", "txt (text)", "pdftotext", available=txt_ok,
+                          note="pdftotext (poppler-utils) not found on this machine"
+                          if not txt_ok else
+                          "extracts embedded text - scanned PDFs have none (use PNG/JPEG)"))
 
     doc_paths = []
     if rep.engines.get("libreoffice", {}).get("status") == STATUS_OK:

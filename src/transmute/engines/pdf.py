@@ -9,6 +9,7 @@ verify-or-keep, never verify-or-shrug. Min savings 1% or keep original.
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -61,17 +62,24 @@ class PdfEngine:
 
     # ------------------------------------------------------------- convert
     def convert(self, src: Path, dst: Path, *, deep: bool = False,
+                target: str | None = None, page: int = 1, dpi: int = 150,
                 min_savings_pct: float = 1.0, timeout_s: float = 3600.0,
                 governor=None, log_id: str | None = None,
                 log_root: Path | None = None) -> EngineResult:
+        """target=None -> lossless ladder (the doctrine above).
+        target png|jpg|txt -> poppler TRANSFORM (render page / extract text):
+        a different operation, never routed through the compression ladder."""
         t0 = time.monotonic()
         src, dst = Path(src), Path(dst)
+        if not src.is_file():
+            return EngineResult("failed", reason="source file missing")
+        if target and target != "pdf":
+            return self._export(src, dst, target, page=page, dpi=dpi,
+                                timeout_s=timeout_s, governor=governor, t0=t0)
         avail = self.availability()
         if not avail.ok:
             return EngineResult("failed", reason=avail.reason,
                                 data={"engine_unavailable": True})
-        if not src.is_file():
-            return EngineResult("failed", reason="source file missing")
 
         log_path = None
         if log_root is not None and log_id:
@@ -143,6 +151,87 @@ class PdfEngine:
             return None if res.ok else ("timed out" if res.timed_out
                                         else _tail(res.stderr_text) or f"gs exit {res.returncode}")
         return f"unknown method {method}"
+
+    # ------------------------------------------------- export (TRANSFORM path)
+    def page_count(self, src: Path) -> int:
+        """Page count read FROM the file (pikepdf first, qpdf fallback) so the
+        per-page export fan-out never guesses. Raises ValueError with the
+        machine's own reason - the UI shows that, nothing invented."""
+        src = Path(src)
+        pike = _pike()
+        if pike is not None:
+            try:
+                with pike.open(src) as pdf:
+                    return len(pdf.pages)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"cannot open PDF: {type(exc).__name__}: {exc}") from exc
+        if self.engines.is_available("qpdf"):
+            res = run_command([self.engines.path("qpdf"), "--show-npages", src],
+                              timeout_s=120)
+            if res.ok and res.stdout.strip().isdigit():
+                return int(res.stdout.strip())
+            raise ValueError("qpdf could not count pages: "
+                             + (_tail(res.stderr_text) or f"exit {res.returncode}"))
+        raise ValueError("no PDF reader available on this machine "
+                         "(install poppler-utils or qpdf)")
+
+    def _export(self, src: Path, dst: Path, target: str, *, page: int, dpi: int,
+                timeout_s: float, governor, t0: float) -> EngineResult:
+        """PDF -> PNG/JPEG page or TXT via poppler, writing to a temp next to
+        `dst` and validating BEFORE replace (magic bytes / non-blank text).
+        This is a transform: output is judged by well-formedness, not by
+        pixel-identity against a PDF it is no longer."""
+        if target in ("png", "jpg"):
+            tool = "pdftoppm"
+            dev = "png" if target == "png" else "jpeg"
+            magic = b"\x89PNG" if target == "png" else b"\xff\xd8\xff"
+        elif target == "txt":
+            tool, dev, magic = "pdftotext", "-q", None
+        else:
+            return EngineResult("failed", reason=f"unknown PDF export target '{target}'")
+        if not self.engines.is_available(tool):
+            return EngineResult("failed",
+                                reason=f"{tool} not found on this machine - "
+                                       f"{self.engines.get(tool).install_hint}",
+                                data={"engine_unavailable": True})
+        try:
+            with tempfile.TemporaryDirectory(prefix="transmute-exp-",
+                                             dir=str(dst.parent)) as td:
+                if tool == "pdftoppm":
+                    cmd = [self.engines.path(tool), f"-{dev}", "-r", str(dpi),
+                           "-f", str(page), "-l", str(page), "-singlefile",
+                           src, str(Path(td) / "pg")]
+                else:
+                    cmd = [self.engines.path(tool), "-q", src, str(Path(td) / "out.txt")]
+                res = run_command(cmd, timeout_s=timeout_s, governor=governor)
+                made = [p for p in Path(td).iterdir() if p.is_file()]
+                if not res.ok or not made:
+                    why = ("timed out" if res.timed_out
+                           else _tail(res.stderr_text) or f"{tool} exit {res.returncode}")
+                    return EngineResult("failed", reason=f"{tool}: {why}",
+                                        seconds=time.monotonic() - t0,
+                                        data={"page": page} if tool == "pdftoppm" else None)
+                data = made[0].read_bytes()
+                if not data.strip():
+                    if target == "txt":
+                        return EngineResult(
+                            "failed", seconds=time.monotonic() - t0,
+                            reason="this PDF has no extractable text (scanned pages?) - "
+                                   "export it as PNG/JPEG instead")
+                    return EngineResult("failed", reason=f"{tool}: produced empty output",
+                                        seconds=time.monotonic() - t0)
+                if magic is not None and not data.startswith(magic):
+                    return EngineResult("failed",
+                                        reason=f"{tool}: output is not a valid {target.upper()} file",
+                                        seconds=time.monotonic() - t0)
+                os.replace(made[0], dst)
+        except OSError as exc:
+            return EngineResult("failed", reason=f"export write error: {exc}",
+                                seconds=time.monotonic() - t0)
+        return EngineResult("converted", output=dst, encoder=tool,
+                            seconds=time.monotonic() - t0,
+                            data={"verified_by_engine": True, "page": page,
+                                  "bytes": len(data)})
 
     # ------------------------------------------------------------- verify (F24)
     def verify(self, src: Path, out: Path, *, deep: bool = False, dpi: int = 100) -> EngineResult:

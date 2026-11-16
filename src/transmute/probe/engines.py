@@ -56,6 +56,11 @@ _INSTALL_HINTS: dict[str, dict[str, str]] = {
         "windows": "Get a Windows build of Poppler (e.g. https://github.com/oschwartz10612/poppler-windows) "
                    "and set the path in Settings → Engines.",
     },
+    "pdftotext": {
+        "linux": "Install poppler-utils (pacman -S poppler / apt install poppler-utils).",
+        "windows": "Get a Windows build of Poppler (e.g. https://github.com/oschwartz10612/poppler-windows) "
+                   "and set the path in Settings → Engines.",
+    },
     "libreoffice": {
         "linux": "Install LibreOffice with your package manager (pacman -S libreoffice-fresh / "
                  "apt install libreoffice).",
@@ -103,6 +108,9 @@ KNOWN_ENGINES: dict[str, EngineSpec] = {
         extra_names=(("gs", "ghostscript"), ("gswin64c", "gs"))),
     "pdftoppm": EngineSpec(
         "pdftoppm", ("pdftoppm",), ("-v",), re.compile(r"([0-9][0-9.]*)"),
+        optional=True),
+    "pdftotext": EngineSpec(
+        "pdftotext", ("pdftotext",), ("-v",), re.compile(r"([0-9][0-9.]*)"),
         optional=True),
     "libreoffice": EngineSpec(
         "libreoffice", ("libreoffice", "soffice", "soffice.bin", "soffice.exe"),

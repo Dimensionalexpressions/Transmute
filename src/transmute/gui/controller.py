@@ -25,6 +25,10 @@ _SUFFIX = {"vp8": ".webm", "vp9": ".webm"}
 # rare: h264/hevc copy fine there and it is a real interop format.
 REMUX_CONTAINERS = (".mkv", ".mp4", ".webm", ".ts")
 
+# PDF picker target id -> engine transform name (A1). Transforms, not
+# compression: the engine routes them away from the lossless ladder.
+PDF_EXPORT = {"png (per page)": "png", "jpg (per page)": "jpg", "txt (text)": "txt"}
+
 
 @dataclass
 class TargetInfo:
@@ -127,6 +131,10 @@ class ConverterController:
         "alac": "ALAC", "vorbis": "Vorbis",
         "webp": "WebP", "webp(animated)": "WebP (animated)",
         "avif": "AVIF", "png": "PNG", "jpeg": "JPEG",
+        "pdf (lossless smaller)": "Smaller PDF",
+        "png (per page)": "PNG image (one file per page)",
+        "jpg (per page)": "JPEG image (one file per page)",
+        "txt (text)": "Plain text",
     }
     _TAGLINE = {
         "av1": "smallest file, slowest to convert",
@@ -145,6 +153,10 @@ class ConverterController:
         "avif": "newest and smallest, needs recent apps",
         "png": "lossless, exact pixels",
         "jpeg": "classic photo format",
+        "pdf (lossless smaller)": "pixel-identical recompression",
+        "png (per page)": "exact pixels, larger",
+        "jpg (per page)": "smaller page images",
+        "txt (text)": "text only, images dropped",
     }
     # raw encoder ids -> words a human chose on purpose (F10 ladder order kept)
     _GPU_SUFFIX = {"nvenc": "GPU - NVIDIA", "vaapi": "GPU - VA-API",
@@ -366,18 +378,50 @@ class ConverterController:
                 opts["crf"] = int(crf)
         if category == "image" and quality is not None:
             opts["quality"] = int(quality)
-        if category == "pdf" and deep_pdf:
-            opts["deep"] = True   # lossy recompress - the UI must label it so
+        if category == "pdf":
+            if target in PDF_EXPORT:
+                opts["target"] = PDF_EXPORT[target]   # transform (A1), not ladder
+            elif deep_pdf:
+                opts["deep"] = True   # lossy recompress - the UI must label it so
         return opts
 
     def enqueue(self, src: Path | str, dst_dir: Path | str, category: str,
                 target: str, *, ext: str | None = None, **kw: Any) -> JobInfo:
+        # Per-page PDF export is N jobs, one page each (progress + retry are
+        # page-local); everything else is the classic single src->dst job.
+        if category == "pdf" and target in ("png (per page)", "jpg (per page)"):
+            return self._enqueue_pages(Path(src), Path(dst_dir), target)
         # `ext` is the GUI's container override (remux picker); conversion
         # options never see it - it only chooses the output suffix.
         dst = self.dst_for(src, category, target, dst_dir, ext=ext)
         rec = self.queue.add(Path(src), dst, category=category,
                              options=self.options_for(category, target, **kw))
         return self._info(rec)
+
+    def _enqueue_pages(self, src: Path, dst_dir: Path, target: str) -> JobInfo:
+        """Fan-out for 'one file per page' targets. The page count is READ
+        from the file (pikepdf/qpdf) - never guessed; an unreadable PDF
+        raises ValueError with the machine's own reason (F3)."""
+        from ..engines.pdf import PdfEngine
+        try:
+            pages = PdfEngine().page_count(src)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(str(exc)) from exc
+        if pages < 1:
+            raise ValueError("this PDF reports 0 pages")
+        suffix = self.suffix_for("pdf", target)
+        opts = self.options_for("pdf", target)
+        stem = src.stem or "file"
+        width = max(2, len(str(pages)))
+        first: JobInfo | None = None
+        for i in range(1, pages + 1):
+            dst = dst_dir / f"{stem}-{i:0{width}d}{suffix}"
+            rec = self.queue.add(src, dst, category="pdf",
+                                 options={**opts, "page": i})
+            if first is None:
+                first = self._info(rec)
+        assert first is not None
+        return first
 
     def process(self, *, max_workers: int = 2) -> Any:
         return self.queue.run(max_workers=max_workers)

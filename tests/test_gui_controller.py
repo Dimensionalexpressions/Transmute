@@ -36,6 +36,13 @@ def _report() -> CapabilityReport:
                   recommended=True),
         MatrixRow(category="pdf", target="pdf (verify renders)",
                   path="pdftoppm", available=True),   # diagnostic: never a target
+        MatrixRow(category="pdf", target="png (per page)", path="pdftoppm",
+                  available=True),
+        MatrixRow(category="pdf", target="jpg (per page)", path="pdftoppm",
+                  available=True),
+        MatrixRow(category="pdf", target="txt (text)", path="pdftotext",
+                  available=False,
+                  note="pdftotext (poppler-utils) not found on this machine"),
         MatrixRow(category="document", target="pdf", path="libreoffice",
                   available=True, recommended=True),
     ]
@@ -80,7 +87,17 @@ class TestPickers:
 
     def test_diagnostic_rows_are_not_targets(self, ctrl):
         names = [t.target for t in ctrl.targets("pdf")]
-        assert names == ["pdf (lossless smaller)"]  # verify-render row excluded
+        # verify-render diagnostic excluded; export targets ARE targets (A1)
+        assert names == ["pdf (lossless smaller)", "png (per page)",
+                         "jpg (per page)", "txt (text)"]
+
+    def test_pdf_export_rows_show_formats_and_reason(self, ctrl):
+        ts = {t.target: t for t in ctrl.targets("pdf")}
+        png = ts["png (per page)"]
+        assert png.available and "PNG" in png.label
+        assert "not available" in ts["txt (text)"].label   # greyed, never hidden (F3)
+        assert "pdftotext" in ts["txt (text)"].reason      # the machine's own reason
+        assert ts["pdf (lossless smaller)"].label.startswith("Smaller PDF")
 
     def test_unavailable_carries_machine_reason(self, ctrl):
         hevc = next(t for t in ctrl.targets("video") if t.target == "hevc")
@@ -146,6 +163,35 @@ class TestEnqueue:
         assert (str(src), str(dst), cat, opts) == \
             ("/x/a.jpg", "/out/a.webp", "image", {"quality": 63})
         assert info.state == "queued"
+
+    def test_pdf_export_options(self, ctrl):
+        assert ctrl.options_for("pdf", "png (per page)") == {"target": "png"}
+        assert ctrl.options_for("pdf", "jpg (per page)") == {"target": "jpg"}
+        assert ctrl.options_for("pdf", "txt (text)") == {"target": "txt"}
+        assert ctrl.dst_for("/x/a.pdf", "pdf", "txt (text)", "/out").name == "a.txt"
+
+    def test_pdf_txt_is_one_job(self, ctrl):
+        ctrl.enqueue("/x/a.pdf", "/out", "pdf", "txt (text)")
+        assert len(ctrl._queue.added) == 1
+        _, dst, cat, opts = ctrl._queue.added[0]
+        assert (str(dst), cat, opts) == ("/out/a.txt", "pdf", {"target": "txt"})
+
+    def test_pdf_per_page_fanout_reads_real_page_count(self, ctrl, text_pdf):
+        info = ctrl.enqueue(text_pdf, "/out", "pdf", "png (per page)")
+        added = ctrl._queue.added
+        assert len(added) == 2                      # page count FROM the file
+        assert [str(d) for _, d, _, _ in added] == ["/out/letter-01.png",
+                                                    "/out/letter-02.png"]
+        assert [o["page"] for *_, o in added] == [1, 2]
+        assert all(o["target"] == "png" for *_, o in added)
+        assert info.dst == "/out/letter-01.png"     # first job reported back
+
+    def test_pdf_fanout_unreadable_raises_machine_reason(self, ctrl, tmp_path):
+        broken = tmp_path / "broken.pdf"
+        broken.write_bytes(b"%PDF-1.4 broken")
+        with pytest.raises(ValueError):
+            ctrl.enqueue(broken, "/out", "pdf", "jpg (per page)")
+        assert ctrl._queue.added == []
 
 
 class TestCategoryRouting:

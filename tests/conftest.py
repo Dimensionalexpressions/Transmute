@@ -16,6 +16,51 @@ warnings.filterwarnings("ignore")
 FF = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
 
 
+def make_text_pdf(pages: list[str]) -> bytes:
+    """Hand-built minimal PDF: one text line per page, Helvetica core font,
+    xref offsets computed exactly (strict parsers must accept it). Used for
+    text-extraction tests - the Pillow-made noise.pdf has NO text layer.
+    """
+    n = len(pages)
+    page_ids = [3 + 2 * i for i in range(n)]
+    cont_ids = [4 + 2 * i for i in range(n)]
+    font_id = 3 + 2 * n
+    objs: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        ("<< /Type /Pages /Kids [%s] /Count %d >>"
+         % (" ".join(f"{p} 0 R" for p in page_ids), n)).encode(),
+    ]
+    for i, text in enumerate(pages):
+        objs.append(("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                     "/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+                     % (font_id, cont_ids[i])).encode())
+        stream = f"BT /F1 24 Tf 72 720 Td ({text}) Tj ET".encode()
+        objs.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for idx, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{idx} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += ("xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)).encode()
+    for off in offsets:
+        out += ("%010d 00000 n \n" % off).encode()
+    out += ("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objs) + 1, xref_at)).encode()
+    return bytes(out)
+
+
+@pytest.fixture(scope="session")
+def text_pdf(tmp_path_factory):
+    """Two-page PDF with extractable text (poppler must read it)."""
+    p = tmp_path_factory.mktemp("pdffix") / "letter.pdf"
+    p.write_bytes(make_text_pdf(["Hello Transmute Page One",
+                                 "Second page says goodbye"]))
+    return p
+
+
 @pytest.fixture(scope="session", autouse=True)
 def app_root(tmp_path_factory):
     """Whole app footprint (config/state/cache/logs) inside pytest tmp."""

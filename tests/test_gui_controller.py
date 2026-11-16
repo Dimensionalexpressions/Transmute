@@ -125,7 +125,7 @@ class TestPickers:
         av1 = next(t for t in ctrl.targets("video") if t.target == "av1")
         h264 = next(t for t in ctrl.targets("video") if t.target == "h264")
         assert av1.label.endswith("✓") and not av1.compat_flag
-        assert h264.label.endswith("ℹ️") and h264.compat_flag
+        assert h264.label.endswith("(!)") and h264.compat_flag
 
     def test_default_target_is_first_available(self, ctrl):
         assert ctrl.default_target("video").target == "av1"

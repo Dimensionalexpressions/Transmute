@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -143,13 +143,19 @@ class MainWindow(QMainWindow):
         self.tgt_box.currentIndexChanged.connect(self._load_encoders)
         rv.addRow("Target", self.tgt_box)
         # plain-language details for the chosen target (what you get, measured
-        # speed per device on THIS machine). User feedback: options stay
-        # simple; details live here, not crammed into the option text.
+        # speed per device on THIS machine). Colours follow the SYSTEM theme
+        # (user feedback: hard-coded light box glared on the dark theme).
+        _dark = self.palette().color(QPalette.ColorRole.Window
+                                     ).lightness() < 128
         self.lbl_about = QLabel("")
         self.lbl_about.setWordWrap(True)
-        self.lbl_about.setStyleSheet("color:#39706a;"
-                                     "background:#eef6f5;border-radius:6px;"
-                                     "padding:6px 8px;")
+        self.lbl_about.setStyleSheet(
+            "color:#a3ccc6;background:#26332f;" if _dark else
+            "color:#2f5f59;background:#eef6f5;")
+        self.lbl_about.setStyleSheet(self.lbl_about.styleSheet() +
+                                     "border-radius:6px;padding:6px 8px;")
+        self._warn_c = ("color:#e6b45a;" if _dark else "color:#b3541e;")
+        self._ok_c = ("color:#7cc47f;" if _dark else "color:#2e7d32;")
         rv.addRow(self.lbl_about)
         self.enc_box = QComboBox()
         self.enc_box.currentIndexChanged.connect(
@@ -209,7 +215,7 @@ class MainWindow(QMainWindow):
         rv.addRow(self.lbl_note)
         self.lbl_remux = QLabel("")
         self.lbl_remux.setWordWrap(True)
-        self.lbl_remux.setStyleSheet("color:#b3541e;")
+        self.lbl_remux.setStyleSheet(self._warn_c)
         rv.addRow(self.lbl_remux)
         # QFormLayout.addRow returns no row index in PySide6 - derive them
         # by scanning the form once (cheap, fixed set).
@@ -324,7 +330,7 @@ class MainWindow(QMainWindow):
                     "⚠ HDR source: this ffmpeg lacks the tone-map chain "
                     "(probed); output will keep HDR tags.")
         elif hdr is None:
-            self.lbl_hdr.setText("ℹ ffprobe missing: HDR status unknown.")
+            self.lbl_hdr.setText("HDR status unknown - ffprobe missing.")
 
     def _load_targets(self, category: str) -> None:
         self.tgt_box.clear()
@@ -537,17 +543,17 @@ class MainWindow(QMainWindow):
         src = self._first_video_file()
         if src is None:
             self.lbl_remux.setStyleSheet("color:#555;")
-            self.lbl_remux.setText("ℹ add a video file to check copy safety")
+            self.lbl_remux.setText("Add a video file to check copy safety")
             return
         reason = self.ctrl.remux_block_reason(src, self.remux_box.currentText())
         self.lbl_remux.setToolTip(
             "checked against the first video file in the list; every job is "
             "re-checked by the engine when it runs")
         if reason:
-            self.lbl_remux.setStyleSheet("color:#b3541e;")
+            self.lbl_remux.setStyleSheet(self._warn_c)
             self.lbl_remux.setText("⚠ " + reason)
         else:
-            self.lbl_remux.setStyleSheet("color:#2e7d32;")
+            self.lbl_remux.setStyleSheet(self._ok_c)
             self.lbl_remux.setText(
                 f"✓ {src.name}: streams copy losslessly into "
                 f"{self.remux_box.currentText()}")

@@ -212,7 +212,7 @@ class ConverterController:
         "h264": "The safe choice: almost every screen, phone, and website made "
                 "in the last 15 years plays it. Medium size.",
         "hevc": "About 30% smaller than H.264 with the same quality. Recent "
-                "iPhones, Androids and TVs play it; older apps may not. ℹ️",
+                "iPhones, Androids and TVs play it; older apps may not",
         "av1": "Smallest files - best for archiving and slow connections. "
                "Needs fairly new devices to play it.",
         "vp9": "The free web format - smaller than H.264. Browsers and Android "
@@ -233,6 +233,18 @@ class ConverterController:
         "avif": "Newest and smallest photo format; needs recent apps.",
     }
 
+    @staticmethod
+    def _speed_word(fps: float) -> str:
+        """Plain words for measured speed tiers - user feedback: say HOW
+        FAST, don't explain how it was measured."""
+        if fps >= 500:
+            return "very fast"
+        if fps >= 150:
+            return "fast"
+        if fps >= 40:
+            return "decent"
+        return "slow"
+
     def _vaapi_word(self) -> str:
         """Which GPU sits behind /dev/dri VAAPI nodes - read from /sys now,
         never assumed at build time."""
@@ -248,9 +260,9 @@ class ConverterController:
         except OSError:
             pass
         if "amdgpu" in drivers:
-            w = "the AMD graphics built into your CPU"
+            w = "AMD built-in graphics"
         elif drivers & {"i915", "xe"}:
-            w = "the Intel graphics built into your CPU"
+            w = "Intel built-in graphics"
         else:
             w = "your GPU (via VA-API)"
         self._vaapi_cache = w
@@ -258,14 +270,14 @@ class ConverterController:
 
     def _device_word(self, enc) -> str:
         if enc.backend == "nvidia-nvenc":
-            return "your NVIDIA graphics card"
+            return "NVIDIA graphics"
         if enc.backend == "va-api":
             return self._vaapi_word()
         if enc.backend == "intel-oneapi":
             return "Intel Quick Sync"
         if enc.backend == "amd-amf":
-            return "AMD graphics (AMF)"
-        return "your CPU"
+            return "AMD AMF graphics"
+        return "CPU"
 
     def about_lines(self, category: str, target: str,
                     encoder: str = "") -> list[str]:
@@ -289,24 +301,25 @@ class ConverterController:
                 per_dev.setdefault(self._device_word(e), e)
             devs = list(per_dev.values())
             best = devs[0]
+            if len(devs) > 1:
+                lines.append(
+                    "On this PC: "
+                    + ", ".join(f"{self._device_word(e)} "
+                                f"{self._speed_word(e.fps)}"
+                                for e in devs)
+                    + f" - fastest: {self._device_word(best)}.")
+            else:
+                lines.append(
+                    f"On this PC: {self._device_word(best)} "
+                    f"{self._speed_word(best.fps)}.")
             if encoder:
                 sel = next((e for e in tried
                             if e.name == encoder.rsplit("/", 1)[-1]), None)
                 if sel is not None:
                     lines.append(
-                        f"Selected {self._device_word(sel)} - measured "
-                        f"{sel.fps:.0f} fps on the benchmark clip.")
-            if len(devs) > 1:
-                lines.append(
-                    f"Fastest here: {self._device_word(best)} "
-                    f"({best.fps:.0f} fps). Also works: "
-                    + ", ".join(f"{self._device_word(e)} {e.fps:.0f}"
-                                for e in devs[1:]) + " fps.")
-            else:
-                lines.append(f"Measured here: {best.fps:.0f} fps - "
-                             f"{self._device_word(best)}.")
-            lines.append("Speed is measured by test-encoding, never guessed; "
-                         "the live timer replaces it while converting.")
+                        f"This encoder: {self._device_word(sel)} - "
+                        f"{self._speed_word(sel.fps)} "
+                        f"({sel.fps:.0f} fps).")
         return lines
 
     def targets(self, category: str) -> list[TargetInfo]:
@@ -339,7 +352,7 @@ class ConverterController:
                 # block (about_lines), not crammed into the option text.
                 label = f"{pretty} - {tagline}" if tagline else pretty
                 if any(r.compat_flag for r in live):
-                    label += "  ℹ️"
+                    label += "  (!)"
                 elif any(r.recommended for r in live):
                     label += "  ✓"
                 reason = ""
@@ -350,7 +363,7 @@ class ConverterController:
                     "no working encoder found"
                 label = f"{pretty} - not available here ({short})"
                 if any(r.compat_flag for r in rows):
-                    label += "  ℹ️"
+                    label += "  (!)"
                 reason = "; ".join(dict.fromkeys(raw)) or \
                     "not available on this machine"
             first = rows[0]

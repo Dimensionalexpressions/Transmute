@@ -125,7 +125,9 @@ class TestPickersMirrorTheReport:
         window.cat_box.setCurrentText("video")
         texts = [_model_item(window.tgt_box, i).text().lower()
                  for i in range(window.tgt_box.count())]
-        assert any("h.264" in t and "ℹ️" in t for t in texts)  # F14
+        assert any("h.264" in t and "(!)" in t for t in texts)  # F14
+        # (!) replaces the emoji badge: it rendered as a broken box on some
+        # desktop fonts; full patent note stays in the item tooltip.
         assert any("av1" in t and "✓" in t for t in texts)
 
 

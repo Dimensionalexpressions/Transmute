@@ -95,7 +95,7 @@ KNOWN_ENGINES: dict[str, EngineSpec] = {
         "ffprobe", ("ffprobe",), ("-hide_banner", "-version"),
         re.compile(r"ffprobe version n?([0-9][0-9.]*)")),
     "qpdf": EngineSpec(
-        "qpdf", ("qpdf",), ("--version"), re.compile(r"qpdf version ([0-9][0-9.]*)"),
+        "qpdf", ("qpdf",), ("--version",), re.compile(r"qpdf version ([0-9][0-9.]*)"),
         optional=True),
     "gs": EngineSpec(
         "gs", ("gs", "ghostscript", "gsc", "gswin64c"),

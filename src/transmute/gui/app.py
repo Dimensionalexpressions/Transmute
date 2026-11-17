@@ -18,12 +18,34 @@ from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter,
+    QFrame, QProgressBar, QPushButton, QRadioButton, QSlider,
+    QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .controller import REMUX_CONTAINERS, ConverterController
 from ..watch import make_queue_callback
+
+
+
+def _fmt_secs(s: float) -> str:
+    if s < 45:
+        return f"{max(1, int(round(s)))} s"
+    m = s / 60.0
+    if m < 2:
+        return "about a minute"
+    if m < 90:
+        return f"{round(m)} min"
+    h = m / 60.0
+    return (f"{h:.1f} hours" if h < 10 else f"{round(h)} hours")
+
+
+def _fmt_bytes(n: float) -> str:
+    if n < 1e6:
+        return f"{int(n // 1024)} KB"
+    if n < 1e9:
+        return f"{n / 1e6:.0f} MB"
+    return f"{n / 1e9:.2f} GB"
 
 
 class MainWindow(QMainWindow):
@@ -34,7 +56,7 @@ class MainWindow(QMainWindow):
     reprobe_done = Signal()
     bench_note = Signal(int, int, str)   # done, total, what (worker -> GUI)
     bench_failed = Signal(str)           # "" ok; otherwise the machine's reason
-    est_done = Signal(int, str)          # generation, estimate line ("" = none)
+    est_done = Signal(int, object)       # generation, measured estimate dict
 
     def __init__(self, controller: ConverterController | None = None) -> None:
         super().__init__()
@@ -185,6 +207,11 @@ class MainWindow(QMainWindow):
                 "color:#2f5f59;background:#eef6f5;border-radius:6px;"
                 "padding:6px;")
         rv.addRow(self.lbl_est)
+        self._est_ok_style = self.lbl_est.styleSheet()
+        self._est_warn_style = (
+            "color:#d9a441;background:#3a3324;border-radius:6px;padding:6px;"
+            if _dark else
+            "color:#8a6d1a;background:#fdf6e3;border-radius:6px;padding:6px;")
         self.btn_bench = QPushButton("Re-benchmark this PC")
         self.btn_bench.setToolTip(
             "Test-encodes a 720p sample on every encoder found here, then "
@@ -228,11 +255,6 @@ class MainWindow(QMainWindow):
         rv.addRow("Remux into", self.remux_box)
         self.chk_tonemap = QCheckBox("Tone-map HDR to SDR")
         rv.addRow("", self.chk_tonemap)
-        self.chk_audio_replace = QCheckBox("Force audio re-encode (AAC)")
-        self.chk_audio_replace.setToolTip(
-            "Default only replaces audio when the target container rejects "
-            "the existing codec; this forces it always.")
-        rv.addRow("", self.chk_audio_replace)
 
         # More… options (user directive): the graphics-card switch changes
         # what the capability report may claim - off means CPU-only truth.
@@ -251,9 +273,6 @@ class MainWindow(QMainWindow):
         qlrow = QHBoxLayout()
         self.rad_crf = QRadioButton("Quality (CRF)")
         self.rad_crf.setChecked(True)
-        self.crf_box = QSpinBox()
-        self.crf_box.setRange(0, 51)
-        self.crf_box.setValue(23)
         self.rad_size = QRadioButton("Size target (MB)")
         self.size_box = QDoubleSpinBox()
         self.size_box.setRange(0.5, 100000.0)
@@ -263,14 +282,86 @@ class MainWindow(QMainWindow):
             "control); the report says whether the result is within budget.")
         for w in (self.rad_crf, self.rad_size):
             w.toggled.connect(self._sync_options_enabled)
-        self.crf_box.valueChanged.connect(lambda *_: self._est_dirty())
         self.size_box.valueChanged.connect(lambda *_: self._est_dirty())
         qlrow.addWidget(self.rad_crf)
-        qlrow.addWidget(self.crf_box)
         qlrow.addWidget(self.rad_size)
         qlrow.addWidget(self.size_box)
         qlrow.addStretch(1)
         rv.addRow("Video rate", qlrow)
+
+        # ------------------------------------------- advanced fine-tuning
+        # User directive: an Advanced dropdown for video & audio quality, and
+        # the estimated file size updates with EVERY movement of the selector,
+        # like the parent products. The difference: those numbers stay
+        # MEASURED on this PC (a real sample re-encoded at each new setting) -
+        # between measurements the label honestly says "measuring…".
+        self.btn_adv = QPushButton("▸ Advanced (fine-tune quality & audio)")
+        self.btn_adv.setFlat(True)
+        self.btn_adv.clicked.connect(self._toggle_adv)
+        rv.addRow(self.btn_adv)
+        self.adv_frame = QFrame()
+        af = QFormLayout(self.adv_frame)
+        af.setContentsMargins(12, 0, 0, 0)
+        self.crf_box = QSpinBox()
+        self.crf_box.setRange(0, 51)
+        self.crf_box.setValue(23)
+        self.qslider = QSlider(Qt.Orientation.Horizontal)
+        self.qslider.setRange(0, 51)
+        self.qslider.setValue(23)
+        # drag RIGHT = better quality = lower CRF, like every editor slider
+        self.qslider.setInvertedAppearance(True)
+        self.qslider.valueChanged.connect(
+            lambda v: self._on_crf_choice(v, "slider"))
+        self.crf_box.valueChanged.connect(
+            lambda v: self._on_crf_choice(v, "spin"))
+        self.lbl_crf_word = QLabel("")
+        self.lbl_size = QLabel("")
+        self.lbl_size.setMinimumWidth(90)
+        if _dark:
+            self.lbl_size.setStyleSheet("color:#79b8ff;")
+        else:
+            self.lbl_size.setStyleSheet("color:#0a5bc0;")
+        qrow = QHBoxLayout()
+        qrow.addWidget(self.qslider, stretch=1)
+        qrow.addWidget(self.crf_box)
+        qrow.addWidget(self.lbl_crf_word)
+        qrow.addWidget(self.lbl_size)
+        af.addRow("Quality", qrow)
+        self.preset_box = QComboBox()
+        self.preset_box.addItems(
+            ["ultrafast", "superfast", "veryfast", "faster", "fast",
+             "medium", "slow", "slower", "veryslow", "placebo"])
+        self.preset_box.setCurrentText("medium")
+        self.preset_box.setToolTip(
+            "CPU encoders (x264/x265): slower presets squeeze more quality\n"
+            "out of the same file size. Graphics-card encoders run their own\n"
+            "speed ladder - this row does not apply to them.\n"
+            "Estimates are re-MEASURED with whatever is chosen here.")
+        self.preset_box.currentTextChanged.connect(lambda *_: self._est_dirty())
+        af.addRow("Encoder speed", self.preset_box)
+        self.chk_audio_replace = QCheckBox("Re-encode audio (AAC)")
+        self.chk_audio_replace.setToolTip(
+            "Default leaves audio untouched. This re-encodes it at the\n"
+            "bitrate chosen beside it: smaller files, and the estimate\n"
+            "counts the real audio bytes for exactly this plan.")
+        self.audio_kbps = QComboBox()
+        self.audio_kbps.addItems(
+            ["64k", "96k", "128k", "160k", "192k", "256k", "320k"])
+        self.audio_kbps.setCurrentText("160k")
+        self.audio_kbps.setEnabled(False)
+        self.chk_audio_replace.toggled.connect(
+            lambda on: (self.audio_kbps.setEnabled(
+                bool(on) and self.chk_audio_replace.isEnabled()),
+                self._est_dirty()))
+        self.audio_kbps.currentTextChanged.connect(lambda *_: self._est_dirty())
+        arow = QHBoxLayout()
+        arow.addWidget(self.chk_audio_replace)
+        arow.addWidget(self.audio_kbps)
+        arow.addStretch(1)
+        af.addRow("Audio", arow)
+        rv.addRow(self.adv_frame)
+        self.adv_frame.setVisible(False)  # start folded; ▸ reveals it
+        self._update_crf_word()
         self.quality = QSpinBox()
         self.quality.setRange(10, 100)
         self.quality.setValue(80)
@@ -292,7 +383,8 @@ class MainWindow(QMainWindow):
             "remux": self._row_of(self.chk_remux),
             "remux_into": self._row_of(self.remux_box),
             "tone": self._row_of(self.chk_tonemap),
-            "audio": self._row_of(self.chk_audio_replace),
+            "adv_btn": self._row_of(self.btn_adv),
+            "adv": self._row_of(self.adv_frame),
             "rate": self._row_of(self.rad_crf),
             "quality": self._row_of(self.quality),
             "pdf": self._row_of(self.deep_pdf),
@@ -450,8 +542,42 @@ class MainWindow(QMainWindow):
         self._start_reprobe()
 
     # ------------------------------------------------ estimate (measured here)
+    def _toggle_adv(self) -> None:
+        show = not getattr(self, "_adv_open", False)
+        self._adv_open = show
+        self.adv_frame.setVisible(show)
+        self.btn_adv.setText(
+            ("▾" if show else "▸") + " Advanced (fine-tune quality & audio)")
+
+    def _on_crf_choice(self, val: int, source: str) -> None:
+        """Every notch of the slider (or spin) re-labels immediately and
+        schedules a fresh MEASURED size - parent-product behaviour, honest
+        numbers."""
+        if not getattr(self, "_crf_sync", False):
+            self._crf_sync = True
+            if source == "slider":
+                self.crf_box.setValue(val)
+            else:
+                self.qslider.setValue(val)
+            self._crf_sync = False
+        self._update_crf_word()
+        self.lbl_size.setText("measuring…")
+        self._est_dirty()
+
+    def _update_crf_word(self) -> None:
+        crf = self.crf_box.value()
+        if crf >= 32:
+            word = "small file"
+        elif crf >= 24:
+            word = "balanced"
+        elif crf >= 18:
+            word = "high quality"
+        else:
+            word = "near-lossless"
+        self.lbl_crf_word.setText(f"CRF {crf} · {word}")
+
     def _est_dirty(self) -> None:
-        QTimer.singleShot(700, self._est_run)  # coax: one sample per burst
+        QTimer.singleShot(600, self._est_run)  # coax: one sample per burst
 
     def _est_run(self) -> None:
         if not hasattr(self, "lbl_est"):
@@ -470,30 +596,55 @@ class MainWindow(QMainWindow):
             return
         self._est_gen = getattr(self, "_est_gen", 0) + 1
         g = self._est_gen
+        self.lbl_size.setText("measuring…")
         self.lbl_est.setText("Measuring an estimate on this PC…")
         self.lbl_est.show()
         encoder = self.enc_box.currentData() or ""
         crf = self.crf_box.value() if self.rad_crf.isChecked() else None
         size_mb = self.size_box.value() if self.rad_size.isChecked() else None
+        audio_mode = ("replace" if self.chk_audio_replace.isChecked()
+                      else "copy")
         threading.Thread(target=self._est_body, daemon=True,
-                         args=(g, cat, target, src, encoder, crf,
-                               size_mb)).start()
+                         args=(g, cat, target, src),
+                         kwargs=dict(encoder=encoder, crf=crf,
+                                     size_mb=size_mb,
+                                     preset=self.preset_box.currentText(),
+                                     audio_mode=audio_mode,
+                                     audio_bitrate=(
+                                         self.audio_kbps.currentText()
+                                         if self.chk_audio_replace.isChecked()
+                                         else None))).start()
 
-    def _est_body(self, g, cat, target, src, encoder, crf,
-                  size_mb) -> None:
+    def _est_body(self, g, cat, target, src, **kw) -> None:
         # OFF the GUI thread: touch no widgets; signal only.
         try:
-            line = self.ctrl.conversion_estimate(
-                cat, target, src, encoder=encoder, crf=crf, size_mb=size_mb)
+            d = self.ctrl.conversion_estimate(cat, target, src, **kw)
         except Exception:
-            line = ""
-        self.est_done.emit(g, line)
+            d = {"ok": False, "note": ""}
+        self.est_done.emit(g, d)
 
-    def _on_est_done(self, g: int, line: str) -> None:
+    def _on_est_done(self, g: int, d: object) -> None:
         if not hasattr(self, "lbl_est") or g != getattr(self, "_est_gen", 0):
             return  # stale: the user changed their mind mid-sample
-        if line:
-            self.lbl_est.setText(line)
+        if isinstance(d, dict) and d.get("ok"):
+            sz = _fmt_bytes(float(d.get("bytes", 0.0)))
+            out = (f"your {sz} target" if d.get("size_is_target")
+                   else f"about {sz}")
+            self.lbl_est.setText(
+                f"Estimate for this file: about "
+                f"{_fmt_secs(float(d.get('est_s', 0.0)))} of work, output "
+                f"{out}. Measured from a {float(d.get('sec', 0.0)):.0f} s "
+                "piece of it on this PC.")
+            self.lbl_est.setStyleSheet(self._est_ok_style)
+            self.lbl_est.show()
+            self.lbl_size.setText(f"about {sz}")
+            self.lbl_size.show()
+            return
+        self.lbl_size.setText("")
+        note = d.get("note", "") if isinstance(d, dict) else ""
+        if note:
+            self.lbl_est.setText(f"Estimate: {note}.")
+            self.lbl_est.setStyleSheet(self._est_warn_style)
             self.lbl_est.show()
         else:
             self.lbl_est.hide()
@@ -589,6 +740,26 @@ class MainWindow(QMainWindow):
         self.lbl_about.setVisible(bool(lines))
         self._toggle_row(self._row["about"], bool(lines))
 
+    def _sync_preset_enabled(self) -> None:
+        """x264/x265 speak the speed-word ladder; SVT-AV1/aom/hardware
+        encoders do not - a word fed to them makes ffmpeg fail, so the row
+        goes grey with the machine's own reason (never a silent lie)."""
+        cat = self.cat_box.currentText()
+        target = self._current_target()
+        rate = cat == "video" and not self.chk_remux.isChecked()
+        enc = self.enc_box.currentData()
+        if not enc and target:  # "auto": the ladder head is what runs
+            enc = (self.ctrl.encoders(cat, target) or [""])[0]
+        ok = bool(rate) and enc in ("libx264", "libx265")
+        self.preset_box.setEnabled(ok)
+        self.preset_box.setToolTip(
+            "Slower presets squeeze more quality out of the same file size.\n"
+            "Estimates are re-MEASURED with whatever is chosen here."
+            if ok else
+            "This encoder keeps its own speed settings - the row applies\n"
+            "to x264/x265 only. The estimate still measures what THIS\n"
+            "machine really does with your other choices.")
+
     def _update_enc_note(self) -> None:
         """Human words for what the encoder choice MEANS; raw engine ids go
         to the tooltip. (Live-test finding: 'ffmpeg/libaom-av1' shown next
@@ -639,10 +810,14 @@ class MainWindow(QMainWindow):
                                     "this ffmpeg lacks the zscale+tonemap "
                                     "chain (probed)")
         self.chk_audio_replace.setEnabled(is_v and not remux)
+        self.audio_kbps.setEnabled(is_v and not remux
+                                   and self.chk_audio_replace.isChecked())
         rate = is_v and not remux
         self.rad_crf.setEnabled(rate)
         self.rad_size.setEnabled(rate)
+        self._sync_preset_enabled()
         self.crf_box.setEnabled(rate and self.rad_crf.isChecked())
+        self.qslider.setEnabled(rate and self.rad_crf.isChecked())
         self.size_box.setEnabled(rate and self.rad_size.isChecked())
         if remux:
             # codec/encoder are meaningless for a stream copy: disabled but
@@ -723,7 +898,10 @@ class MainWindow(QMainWindow):
         self._toggle_row(self._row["remux"], video)
         self._toggle_row(self._row["remux_into"], video and self.chk_remux.isChecked())
         self._toggle_row(self._row["tone"], video)
-        self._toggle_row(self._row["audio"], video)
+        self._toggle_row(self._row["adv_btn"], video)
+        # the disclosure keeps its own open/closed state (never auto-opens)
+        self._toggle_row(self._row["adv"],
+                         video and getattr(self, "_adv_open", False))
         self._toggle_row(self._row["rate"], video)
         self._toggle_row(self._row["quality"], cat == "image")
         # per-page/text exports bypass the lossless ladder - a deep pass is
@@ -833,6 +1011,9 @@ class MainWindow(QMainWindow):
         elif cat == "video":
             kw["tonemap"] = self.chk_tonemap.isChecked()
             kw["audio_replace"] = self.chk_audio_replace.isChecked()
+            if self.chk_audio_replace.isChecked():
+                kw["audio_bitrate"] = self.audio_kbps.currentText()
+            kw["preset"] = self.preset_box.currentText()
             if self.rad_size.isChecked():
                 kw["size_mb"] = float(self.size_box.value())
             else:

@@ -48,6 +48,19 @@ def test_p3_video_flags_map_to_engine_kwargs():
         "codec": "av1", "size_mb": 1.5}
 
 
+def test_fine_tuning_knobs_map_and_stay_out_when_unset():
+    # Advanced panel: preset/audio bitrate ride to the engine ONLY when chosen
+    c = _ctl()
+    assert c.options_for(
+        "video", "h264", audio_replace=True, audio_bitrate="96k",
+        preset="veryfast") == {
+        "codec": "h264", "audio": "replace", "audio_bitrate": "96k",
+        "preset": "veryfast"}
+    # and never leak into plain runs or other categories
+    assert c.options_for("video", "h264") == {"codec": "h264"}
+    assert c.options_for("image", "png", preset="slow") == {}
+
+
 def test_crf_and_size_are_mutually_exclusive_at_the_gui_too():
     # the engine refuses both; the GUI must refuse before enqueuing (F1/F2)
     with pytest.raises(ValueError):

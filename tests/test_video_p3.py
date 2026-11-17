@@ -156,6 +156,69 @@ def test_audio_replace_mp4_from_opus_mkv(tmp_path, fixtures):
     assert eng.verify(src, dst).ok
 
 
+# ------------------------------------------------------------------- estimates
+def test_estimate_returns_measured_numbers(tmp_path, fixtures):
+    """GUI shows sizes/time measured on THIS PC: the engine must return a
+    dict of real measured numbers for a real sample, or ok=False honestly."""
+    eng = _eng()
+    if eng.pick_encoder("h264", want_10bit=False, prefer_hw=None) is None:
+        pytest.skip("no verified x264 encoder on this machine")
+    d = eng.estimate_conversion(fixtures["mp4"], target_codec="h264",
+                                encoder="libx264", crf=23)
+    assert d["ok"] is True, d
+    assert d["est_s"] > 0 and d["bytes"] > 0
+    assert d["size_is_target"] is False
+    assert 0.3 <= d["sec"] <= 2.6
+    # size-target mode: the claim IS the target, stated as such
+    t = eng.estimate_conversion(fixtures["mp4"], target_codec="h264",
+                                encoder="libx264", size_mb=3.0)
+    assert t["ok"] and abs(t["bytes"] - 3.0e6) < 1
+    assert t["size_is_target"] is True
+
+
+def test_preset_and_audio_bitrate_end_up_in_the_file(tmp_path, fixtures):
+    """Advanced fine-tuning must change the OUTPUT, not just the widgets:
+    a chosen audio bitrate lands in the file bytes even when the container
+    already accepts the original audio (forced re-encode), nonsense presets
+    are rejected at the door, and CPU presets are accepted."""
+    eng = _eng()
+    if eng.pick_encoder("h264", want_10bit=False, prefer_hw=None) is None \
+            or eng.pick_encoder("aac", want_10bit=False, prefer_hw=None) is None:
+        pytest.skip("no verified x264 or aac encoder on this machine")
+    # 3 s mp4 that ALREADY has compatible aac audio: copy would be allowed -
+    # the explicit request must still re-encode at OUR bitrate
+    src = tmp_path / "src3.mp4"
+    ffmpeg = eng.engines.path("ffmpeg")
+    mk = run_command([ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+                      "-f", "lavfi", "-i", "testsrc2=s=64x32:d=3:r=25",
+                      # real signal, not anullsrc silence: silent AAC encodes
+                      # to ~2k whatever the nominal bitrate is - noise proves
+                      # the chosen 48k actually lands in the file
+                      "-f", "lavfi", "-i", "anoisesrc=r=48000:d=3:a=0.4",
+                      "-c:v", "libx264", "-preset", "veryfast",
+                      "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                      "-t", "3", "-y", src], timeout_s=120)
+    if not mk.ok:
+        pytest.skip("could not build 3 s aac-in-mp4 fixture")
+    dst = tmp_path / "fine.mp4"
+    res = eng.convert(src, dst, codec="h264", encoder="libx264",
+                      crf=28, preset="ultrafast", audio="replace",
+                      audio_bitrate="48k")
+    assert res.outcome == "converted", res.reason
+    note = res.data.get("audio_replaced") or {}
+    assert note.get("bitrate") == "48k" and note.get("to") == "aac"
+    acodecs = {(s.get("codec_name") or "").lower()
+               for s in Probe(eng.engines).audio_streams(dst)}
+    assert acodecs == {"aac"}
+    br = int(Probe(eng.engines).audio_streams(dst)[0].get("bit_rate") or 0)
+    assert abs(br - 48000) <= 10000, br  # it is REALLY ~48k in the file
+    assert eng.verify(src, dst).ok
+    # nonsense preset rejected at the door, not deep inside ffmpeg
+    bad = eng.convert(src, tmp_path / "x.mp4", codec="h264",
+                      encoder="libx264", crf=28, preset="ludicrous")
+    assert bad.outcome == "failed" and "preset" in bad.reason
+
+
 # -------------------------------------------------------------------- size target
 def test_size_target_rejects_conflict_and_impossible(tmp_path, fixtures):
     eng = _eng()

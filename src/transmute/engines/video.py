@@ -59,6 +59,17 @@ REMUX_AUDIO_OK = AUDIO_OK_BY_FORMAT
 AUDIO_REPLACE_TO = {"mp4": "aac", "mov": "aac", "matroska": "opus",
                     "webm": "opus", "mpegts": "aac"}
 AUDIO_REPLACE_BITRATE = "160k"
+
+# x264/x265 speed ladder - the GUI combo and this guard must agree:
+# nothing else may ever reach an ffmpeg command line.
+ENCODER_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast",
+                   "medium", "slow", "slower", "veryslow", "placebo")
+
+# Only these encoders speak that vocabulary: SVT-AV1/aom/Rav1e take NUMBERS
+# and hardware encoders carry their own ladders - feeding a word to them
+# breaks ffmpeg (-22), so a preset is simply not applicable there and the
+# GUI greys the row. Estimates use the exact same rule as real conversions.
+WORD_PRESET_ENCODERS = ("libx264", "libx265")
 # Encoders with documented reliable 2-pass rate control (measured, not vendor claim).
 TWO_PASS_ENCODERS = {"libx264", "libx265", "x264", "x265"}
 
@@ -140,6 +151,7 @@ class VideoEngine:
                 encoder: str | None = None, prefer_hw: bool | None = None,
                 remux: bool = False, tonemap: bool = False,
                 audio: str = "copy", size_mb: float | None = None,
+                preset: str | None = None, audio_bitrate: str | None = None,
                 ffmpeg_timeout_s: float = 43200.0,
                 governor=None, log_id: str | None = None,
                 log_root: Path | None = None) -> EngineResult:
@@ -150,6 +162,9 @@ class VideoEngine:
         hash (F2). tonemap=True: opt-in HDR->SDR (F15), only honoured when the
         probe's executed chain trial passed. audio: copy|replace.
         size_mb: MB budget; exact 2-pass for x264/x265 else labelled approximate.
+        preset: x264/x265 speed/range (CPU encoders only - hardware encoders
+        carry their own). audio_bitrate: e.g. "160k", applies with
+        audio='replace' only.
         """
         t0 = time.monotonic()
         avail = self.availability()
@@ -232,27 +247,33 @@ class VideoEngine:
         audio_bps = sum(int(s.get("bit_rate") or 128_000)
                         for s in self.probe.audio_streams(src)
                         if (s.get("codec_name") or "").lower())
-        if bad_audio:
-            if audio == "copy":
-                repl = AUDIO_REPLACE_TO.get(fmt, "aac")
+        if audio not in ("copy", "replace"):
+            return EngineResult("failed", reason="audio policy must be 'copy' or 'replace'")
+        if audio_bitrate is not None and not re.fullmatch(r"\d{1,4}k", audio_bitrate):
+            return EngineResult("failed",
+                                reason="audio bitrate must look like '160k'")
+        if bad_audio and audio == "copy":
+            repl = AUDIO_REPLACE_TO.get(fmt, "aac")
+            return EngineResult(
+                "failed",
+                reason=f"audio stream(s) {bad_audio} cannot be copied into "
+                       f"'{fmt}' losslessly; use audio='replace' (transcodes "
+                       f"audio only, to {repl}) or a mkv/webm target")
+        if audio == "replace":
+            # explicit request (or container forcing it): audio is re-encoded,
+            # at the bitrate the user chose - this is the "fine-tune audio" path
+            repl = AUDIO_REPLACE_TO.get(fmt, "aac")
+            cap_a = self.pick_encoder(repl, want_10bit=False, prefer_hw=None)
+            if cap_a is None:
                 return EngineResult(
                     "failed",
-                    reason=f"audio stream(s) {bad_audio} cannot be copied into "
-                           f"'{fmt}' losslessly; use audio='replace' (transcodes "
-                           f"audio only, to {repl}) or a mkv/webm target")
-            elif audio == "replace":
-                repl = AUDIO_REPLACE_TO.get(fmt, "aac")
-                cap_a = self.pick_encoder(repl, want_10bit=False, prefer_hw=None)
-                if cap_a is None:
-                    return EngineResult(
-                        "failed",
-                        reason=f"audio {bad_audio} must be transcoded for '{fmt}' "
-                               f"but no verified {repl} encoder exists on this machine")
-                audio_cmd = ["-c:a", cap_a.name, "-b:a", AUDIO_REPLACE_BITRATE]
-                audio_bps = int(AUDIO_REPLACE_BITRATE[:-1]) * 1000 * max(len(acodecs), 1)
-                audio_note = {"from": bad_audio, "to": repl, "encoder": cap_a.name}
-            else:
-                return EngineResult("failed", reason="audio policy must be 'copy' or 'replace'")
+                    reason=f"audio must be transcoded to {repl} for '{fmt}' "
+                           f"but no verified {repl} encoder exists on this machine")
+            br = audio_bitrate or AUDIO_REPLACE_BITRATE
+            audio_cmd = ["-c:a", cap_a.name, "-b:a", br]
+            audio_bps = int(br[:-1]) * 1000 * max(len(acodecs), 1)
+            audio_note = {"from": bad_audio or sorted(acodecs) or ["audio"],
+                          "to": repl, "encoder": cap_a.name, "bitrate": br}
 
         # ------------------------------------------------ quality: CRF or size target
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
@@ -266,6 +287,20 @@ class VideoEngine:
             cmd += ["-movflags", "+faststart"]
         if tone:
             cmd += ["-vf", TONEMAP_VFILTER]
+
+        pre_flags: list[str] = []
+        if preset:
+            if cap is not None and cap.name in WORD_PRESET_ENCODERS \
+                    and cap.backend == "cpu":
+                if preset not in ENCODER_PRESETS:
+                    return EngineResult(
+                        "failed",
+                        reason=f"unknown encoder preset {preset!r} "
+                               f"(allowed: {', '.join(ENCODER_PRESETS)})")
+                pre_flags = ["-preset", preset]
+            # hardware encoders carry their own speed ladder: silently ignoring
+            # a CPU preset there is honest because the GUI hides it per encoder
+        cmd += pre_flags
 
         crf_val: int | None = None
         size_note: dict[str, Any] | None = None
@@ -307,7 +342,7 @@ class VideoEngine:
                     p1 = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
                           "-i", src, "-map", "0:v:0", "-c:v", cap.name,
                           "-b:v", str(v_bps), "-pass", "1", "-passlogfile", pfx,
-                          "-an"]
+                          "-an", *pre_flags]
                     if tone:
                         p1 += ["-vf", TONEMAP_VFILTER]
                     p1 += ["-f", "null", "-"]
@@ -400,16 +435,23 @@ class VideoEngine:
     # --------------------------------------------------- estimate (GUI preview)
     def estimate_conversion(self, src: Path, *, target_codec: str,
                             encoder: str | None = None, crf: int | None = None,
-                            size_mb: float | None = None) -> str:
-        """One honest line: how long and how big THIS file becomes, measured
-        by encoding a real ~2-second piece of it with the SAME encoder and
-        quality on THIS machine (user directive: every number on this screen
-        comes from this hardware's own behaviour, never from tables).
-        Returns "" when nothing can be estimated (audio targets, unknown
-        duration...)."""
+                            size_mb: float | None = None,
+                            preset: str | None = None,
+                            audio_mode: str = "copy",
+                            audio_bitrate: str | None = None) -> dict:
+        """Numbers for the GUI: how long and how big THIS file becomes,
+        measured by encoding a real ~2-second piece of it with the SAME
+        encoder, preset, quality and audio plan on THIS machine (user
+        directive: every number on this screen comes from this hardware's own
+        behaviour, never from tables). Returns
+        {"ok": bool, "est_s": float, "bytes": float, "size_is_target": bool,
+         "sec": float, "note": str} - note carries the machine's own reason
+        when ok is False ("" = nothing to say)."""
+        none = {"ok": False, "est_s": 0.0, "bytes": 0.0,
+                "size_is_target": False, "sec": 0.0, "note": ""}
         dur = self.probe.duration_s(src)
         if not dur or dur <= 0:
-            return ""
+            return none
         if encoder:
             cap = next((c for c in self.prober.report().encoders
                         if c.name == encoder and c.verified), None)
@@ -417,10 +459,22 @@ class VideoEngine:
             cap = self.pick_encoder(target_codec, want_10bit=False,
                                     prefer_hw=None)
         if cap is None:
-            return ""
+            return none
         ffmpeg = self.engines.path("ffmpeg")
         if ffmpeg is None:
-            return ""
+            return none
+        astreams = [st for st in self.probe.audio_streams(src)
+                    if (st.get("codec_name") or "").lower()]
+        if audio_mode == "replace" and astreams:
+            br = (audio_bitrate if audio_bitrate
+                  and re.fullmatch(r"\d{1,4}k", audio_bitrate)
+                  else AUDIO_REPLACE_BITRATE)
+            audio_bps = int(br[:-1]) * 1000 * len(astreams)
+        else:
+            # stream-copied audio keeps the file's real bitrates (measured from
+            # this file, not typed in)
+            audio_bps = sum(int(st.get("bit_rate") or 128_000)
+                            for st in astreams)
         sec = min(2.0, max(0.5, dur / 4.0))
         start = max(0.0, dur / 3.0)
         td = tempfile.mkdtemp(prefix="transmute-est-")
@@ -433,11 +487,12 @@ class VideoEngine:
         crf_val = crf if crf is not None else DEFAULT_CRF.get(target_codec)
         if crf_val is not None and cap.backend == "cpu":
             cmd += ["-crf", str(crf_val)]
+            if preset and cap.name in WORD_PRESET_ENCODERS \
+                    and preset in ENCODER_PRESETS:
+                cmd += ["-preset", preset]
         elif crf_val is not None and cap.name.endswith("_nvenc"):
             cmd += ["-cq", str(crf_val), "-b:v", "0", "-preset", "slow"]
         if size_mb is not None:  # rate-control mode: sample at the job bitrate
-            audio_bps = sum(int(st.get("bit_rate") or 128_000)
-                            for st in self.probe.audio_streams(src))
             v_bps = max(int(size_mb * 8e6 / dur) - audio_bps, 100_000)
             cmd += ["-b:v", str(v_bps)]
         cmd += ["-y", str(out)]
@@ -451,25 +506,16 @@ class VideoEngine:
             m = re.findall(r"frame=\s*(\d+)", stderr)
             if m:
                 frames = int(m[-1])
-            enc_fps = 0.0
-            m = re.findall(r"fps=([\d.]+)", stderr)
-            if m:
-                try:
-                    enc_fps = float(m[-1])
-                except ValueError:
-                    pass
             out_bytes = out.stat().st_size if out.exists() else 0
         finally:
             shutil.rmtree(td, ignore_errors=True)
         if not frames or not out_bytes:
             if res is not None and res.timed_out:
-                return ("Estimate: this PC could not finish even a 2 s sample "
-                        "in 2 minutes - expect very slow conversions.")
-            return ""
-        # audio streams are stream-copied into the output: count their real
-        # bitrate over the whole duration (measured from this file, not typed)
-        audio_bytes = sum(int(st.get("bit_rate") or 128_000)
-                          for st in self.probe.audio_streams(src)) * dur
+                return {"ok": False, "est_s": 0.0, "bytes": 0.0,
+                        "size_is_target": False, "sec": sec,
+                        "note": "this PC could not finish even a 2 s sample "
+                                "in 2 minutes - expect very slow conversions"}
+            return none
         src_fps = 0.0
         v = self.probe.primary_video(src)
         if v:
@@ -488,14 +534,13 @@ class VideoEngine:
             est_s = (wall_work / frames) * frames_total
         else:
             est_s = wall * (dur / sec)
-        size = out_bytes * (dur / sec) + audio_bytes
+        size = out_bytes * (dur / sec) + audio_bps * dur
         if size_mb is not None:
-            size_txt = _human_size(size_mb * 1e6)  # hit-your-target is the claim
-        else:
-            size_txt = _human_size(size)
-        return (f"Estimate for this file: about {_human_secs(est_s)} of work, "
-                f"output about {size_txt}. Measured from a {sec:.0f} s piece "
-                "of it on this PC.")
+            # hit-your-target is the claim; the sample above proved the rate
+            # control runs at usable speed on this machine
+            size = size_mb * 1e6
+        return {"ok": True, "est_s": est_s, "bytes": size,
+                "size_is_target": size_mb is not None, "sec": sec, "note": ""}
 
     def _remux(self, src: Path, dst: Path, *, fmt: str, ffmpeg: Path,
                sv: dict, audio: str, ffmpeg_timeout_s: float,

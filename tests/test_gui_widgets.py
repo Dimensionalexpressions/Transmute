@@ -138,11 +138,11 @@ class TestPickersMirrorTheReport:
         from PySide6.QtTest import QTest
         monkeypatch.setattr(window, "_current_target", lambda: "h264")
         monkeypatch.setattr(window, "_target_info", lambda c, t: None)
-        monkeypatch.setattr(window.ctrl, "conversion_estimate",
-                            lambda *a, **k: ("Estimate for this file: about "
-                                             "1 min of work, output about "
-                                             "5 MB. Measured from a 2 s "
-                                             "piece of it on this PC."))
+        monkeypatch.setattr(
+            window.ctrl, "conversion_estimate",
+            lambda *a, **k: {"ok": True, "est_s": 62.0, "bytes": 5e6,
+                             "size_is_target": False, "sec": 2.0,
+                             "note": ""})
         window.cat_box.setCurrentText("video")
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"x")
@@ -155,6 +155,47 @@ class TestPickersMirrorTheReport:
                     and "Estimate for this file" in window.lbl_est.text()):
                 break
         assert "output about 5 MB" in window.lbl_est.text()
+        # the measured size also shows inline by the quality slider
+        assert "about 5 MB" in window.lbl_size.text()
+
+    def test_advanced_size_label_re_measures_on_slider_move(
+            self, window, monkeypatch, tmp_path):
+        """User directive: EVERY movement of the quality selector shows the
+        estimated size, parent-product style - and here the number is
+        re-MEASURED (a fresh call at the new setting), never recomputed."""
+        from PySide6.QtTest import QTest
+        seen = []
+
+        def fake(cat, target, src, **kw):
+            seen.append(kw)
+            return {"ok": True, "est_s": 10.0, "bytes": kw["crf"] * 1e6,
+                    "size_is_target": False, "sec": 2.0, "note": ""}
+
+        monkeypatch.setattr(window, "_current_target", lambda: "h264")
+        monkeypatch.setattr(window, "_target_info", lambda c, t: None)
+        monkeypatch.setattr(window.ctrl, "conversion_estimate", fake)
+        window.cat_box.setCurrentText("video")
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x")
+        window._add_one(clip)
+        window._est_run()
+        t0 = time.time()
+        while time.time() - t0 < 10 and "about 23 MB" not in window.lbl_size.text():
+            QTest.qWait(50)
+        assert "about 23 MB" in window.lbl_size.text()
+        # drag the slider to coarser quality: measuring… at once, then a
+        # smaller measured size from a call made at the NEW crf
+        window.qslider.setValue(34)
+        assert window.lbl_size.text() == "measuring…"
+        window._est_run()
+        t0 = time.time()
+        while time.time() - t0 < 10 and "about 34 MB" not in window.lbl_size.text():
+            QTest.qWait(50)
+        assert "about 34 MB" in window.lbl_size.text()
+        assert seen[-1]["crf"] == 34
+        # fine-tuning knobs ride along so the measurement matches the plan
+        assert seen[-1]["preset"] == "medium"
+        assert seen[-1]["audio_mode"] == "copy"
 
     def test_gpu_switch_persists_and_remeasures(self, window, monkeypatch):
         """User directive: the GPU switch lives in More… and off means the
@@ -247,6 +288,8 @@ class TestP3VideoControls:
         assert not window.tgt_box.isEnabled()
         assert not window.crf_box.isEnabled()
         assert not window.size_box.isEnabled()
+        assert not window.qslider.isEnabled()
+        assert not window.preset_box.isEnabled()
         window.chk_remux.setChecked(False)
         assert window.tgt_box.isEnabled()
 
@@ -425,7 +468,7 @@ class TestAdaptivePanel:
     def test_audio_shows_no_video_or_pdf_controls(self, window):
         self._pick(window, "audio")
         self._hidden(window, "chk_remux", "deep_pdf", "quality", "rad_crf",
-                     "chk_tonemap", "chk_audio_replace")
+                     "chk_tonemap", "btn_adv", "adv_frame")
 
     def test_video_shows_only_video_controls(self, window):
         self._pick(window, "video")

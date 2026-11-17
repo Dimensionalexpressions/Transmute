@@ -137,19 +137,25 @@ class ConverterController:
 
     def conversion_estimate(self, cat: str, target: str, src, *,
                             encoder: str = "", crf: int | None = None,
-                            size_mb: float | None = None) -> str:
+                            size_mb: float | None = None,
+                            preset: str | None = None,
+                            audio_mode: str = "copy",
+                            audio_bitrate: str | None = None) -> dict:
         """One-line time+size estimate for THIS file. Every number comes from
         encoding a real piece of the file with the chosen encoder on THIS
         machine (user directive: hardware-measured, never table-guessed).
-        "" when there is nothing honest to say."""
+        {"ok": False} when there is nothing honest to say."""
         from pathlib import Path
+        none = {"ok": False, "est_s": 0.0, "bytes": 0.0,
+                "size_is_target": False, "sec": 0.0, "note": ""}
         if cat != "video" or not target or not src:
-            return ""
+            return none
         try:
             mt = Path(src).stat().st_mtime_ns
         except OSError:
-            return ""
-        key = (str(src), mt, target, encoder, crf, size_mb)
+            return none
+        key = (str(src), mt, target, encoder, crf, size_mb, preset,
+               audio_mode, audio_bitrate)
         cached = self._est_cache.get(key)
         if cached is not None:
             return cached
@@ -161,13 +167,14 @@ class ConverterController:
         if self._paths is not None:
             prev = get_paths()
             set_paths(self._paths)
-        line = ""
+        line: dict = none
         try:
             line = self._video_engine.estimate_conversion(
                 Path(src), target_codec=target, encoder=encoder or None,
-                crf=crf, size_mb=size_mb)
+                crf=crf, size_mb=size_mb, preset=preset,
+                audio_mode=audio_mode, audio_bitrate=audio_bitrate)
         except Exception:
-            line = ""  # estimate is advisory - never break the GUI over it
+            line = none  # estimate is advisory - never break the GUI over it
         finally:
             if prev is not None:
                 set_paths(prev)
@@ -583,7 +590,9 @@ class ConverterController:
                     tonemap: bool = False,
                     audio_replace: bool = False,
                     crf: int | None = None,
-                    size_mb: float | None = None) -> dict[str, Any]:
+                    size_mb: float | None = None,
+                    preset: str | None = None,
+                    audio_bitrate: str | None = None) -> dict[str, Any]:
         # Remux is a different operation, not a codec choice: no codec/encoder
         # keys ride along (F2 - the engine refuses to mix the two).
         if category == "video" and remux:
@@ -598,6 +607,12 @@ class ConverterController:
                 opts["tonemap"] = True
             if audio_replace:
                 opts["audio"] = "replace"
+                if audio_bitrate:
+                    opts["audio_bitrate"] = audio_bitrate
+            if preset:
+                # engine applies it only to CPU encoders (hardware encoders
+                # carry their own ladder - the GUI hides it there)
+                opts["preset"] = preset
             if crf is not None and size_mb is not None:
                 raise ValueError("choose CRF or a size target, not both")
             if size_mb is not None:

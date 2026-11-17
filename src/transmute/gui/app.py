@@ -32,6 +32,8 @@ class MainWindow(QMainWindow):
     # from the wrong thread at teardown)
     run_done = Signal()
     reprobe_done = Signal()
+    bench_note = Signal(int, int, str)   # done, total, what (worker -> GUI)
+    bench_failed = Signal(str)           # "" ok; otherwise the machine's reason
 
     def __init__(self, controller: ConverterController | None = None) -> None:
         super().__init__()
@@ -49,6 +51,8 @@ class MainWindow(QMainWindow):
         self._watch_more = False                 # watch jobs await a worker
         self.run_done.connect(self._on_worker_done)
         self.reprobe_done.connect(self._on_reprobe_done)
+        self.bench_note.connect(self._on_bench_note)
+        self.bench_failed.connect(self._on_bench_failed)
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
         self.setAcceptDrops(True)
@@ -139,7 +143,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left)
 
         # right: what this machine can do, chosen from the probed matrix
-        right = QGroupBox("Convert to (from this machine's capability report)")
+        right = QGroupBox("Convert to")
         rv = QFormLayout(right)
         self._form = rv
         self.cat_box = QComboBox()
@@ -174,6 +178,21 @@ class MainWindow(QMainWindow):
             "run any time.")
         self.btn_bench.clicked.connect(self._start_reprobe)
         rv.addRow("", self.btn_bench)
+        # benchmark progress: the measurement takes minutes on slow machines
+        # and the user must SEE which encoder it is busy with right now.
+        self.bench_bar = QProgressBar()
+        self.bench_bar.setRange(0, 0)
+        self.bench_bar.setTextVisible(False)
+        self.lbl_bench = QLabel("")
+        self.lbl_bench.setWordWrap(True)
+        self.lbl_bench.setStyleSheet(
+            "color:" + ("#8f979e" if _dark else "#616161") + ";")
+        rv.addRow(self.bench_bar)
+        rv.addRow("", self.lbl_bench)
+        self.bench_bar.hide()
+        self.lbl_bench.hide()
+        self._bench_live = False
+        self._bench_cancel = False
         self.enc_box = QComboBox()
         self.enc_box.currentIndexChanged.connect(
             lambda *_: (self._update_enc_note(),
@@ -209,8 +228,8 @@ class MainWindow(QMainWindow):
         self.chk_gpu.setChecked(os.environ.get(
             "TRANSMUTE_DISABLE_GPU", "").lower() not in ("1", "true", "yes"))
         self.chk_gpu.setToolTip(
-            "Off: the app will not use or recommend GPU encoders on this\n"
-            "machine - the capability report is re-measured without them.\n"
+            "Off: this PC will not use or recommend graphics-card\n"
+            "conversion - results are re-measured without it.\n"
             "Graphics encoding keeps your CPU free but files can be larger.")
         self.chk_gpu.toggled.connect(self._on_gpu_toggle)
         mform.addRow(self.chk_gpu)
@@ -413,25 +432,64 @@ class MainWindow(QMainWindow):
         self._start_reprobe()
 
     def _start_reprobe(self) -> None:
-        if (self._worker is not None and self._worker.is_alive()) or \
-                not self.btn_bench.isEnabled():
+        if self._bench_live:
+            # button doubles as Cancel: probe raises ProbeCancelled, the
+            # previous report stays in force (never half-results).
+            self._bench_cancel = True
+            self.btn_bench.setEnabled(False)
+            self.lbl_bench.setText("Cancelling…")
+            return
+        if self._worker is not None and self._worker.is_alive():
             return  # a conversion is hogging the CPUs - measure later
-        self.btn_bench.setEnabled(False)
-        self.btn_bench.setText("Measuring this PC… about a minute")
+        self._bench_live = True
+        self._bench_cancel = False
+        self.btn_bench.setText("Measuring this PC… click to cancel")
+        self.bench_bar.setRange(0, 0)
+        self.bench_bar.show()
+        self.lbl_bench.setText("Looking up installed engines…")
+        self.lbl_bench.show()
         self.lbl_about.setText("")
         self._toggle_row(self._row["about"], False)
         threading.Thread(target=self._reprobe_body, daemon=True).start()
 
     def _reprobe_body(self) -> None:
         # OFF the GUI thread: touch no widgets; signal only.
+        err = ""
         try:
-            self.ctrl.reprobe()
+            self.ctrl.reprobe(
+                progress=lambda d, t, w: self.bench_note.emit(d, t, w),
+                cancel=lambda: self._bench_cancel)
+        except Exception as exc:            # incl. ProbeCancelled
+            err = str(exc) or exc.__class__.__name__
         finally:
+            if err:
+                self.bench_failed.emit(err)
             self.reprobe_done.emit()
 
+    def _on_bench_note(self, done: int, total: int, what: str) -> None:
+        if total > 0:
+            self.bench_bar.setRange(0, total)
+            self.bench_bar.setValue(done)
+            self.lbl_bench.setText(f"Measuring {what}… ({done} of {total})")
+        else:
+            self.lbl_bench.setText(what + "…")
+
+    def _on_bench_failed(self, err: str) -> None:
+        if "cancel" in err.lower():
+            return  # deliberate: _on_reprobe_done just restores the facts
+        self.lbl_bench.setText("Benchmark could not finish here: " + err
+                               + " - previous results are still in force.")
+        self.lbl_bench.setStyleSheet(
+            "color:" + getattr(self, "_warn_c", "#e6b45a") + ";")
+        self.lbl_bench.show()
+
     def _on_reprobe_done(self) -> None:
+        self._bench_live = False
         self.btn_bench.setEnabled(True)
         self.btn_bench.setText("Re-benchmark this PC")
+        self.bench_bar.hide()
+        if not self.lbl_bench.text().startswith("Benchmark could not"):
+            self.lbl_bench.hide()
         cat = self.cat_box.currentText()
         prev = self._current_target()
         self._load_targets(cat)
@@ -442,6 +500,9 @@ class MainWindow(QMainWindow):
                         item.isEnabled():
                     self.tgt_box.setCurrentIndex(i)
                     break
+        # Same target selected fires no currentIndexChanged - without this
+        # the details box stays EMPTY after benchmarking (user-reported).
+        self._load_encoders(0)
 
     def _update_about(self) -> None:
         """Details block: what the chosen target means in plain words + the

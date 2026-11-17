@@ -132,7 +132,7 @@ class ConverterController:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(data, indent=1), "utf-8")
 
-    def reprobe(self) -> CapabilityReport:
+    def reprobe(self, progress=None, cancel=None) -> CapabilityReport:
         """Benchmark button: re-measure THIS machine from scratch (cache
         bypassed, old entry superseded - results always come from the
         hardware the app is actually running on)."""
@@ -142,7 +142,9 @@ class ConverterController:
             prev = get_paths()
             set_paths(self._paths)
         try:
-            self._report = CapabilityProber().report(refresh=True)
+            self._report = CapabilityProber().report(refresh=True,
+                                                     progress=progress,
+                                                     cancel=cancel)
         finally:
             if prev is not None:
                 set_paths(prev)

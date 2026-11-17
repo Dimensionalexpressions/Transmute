@@ -274,6 +274,17 @@ def gpu_force_disabled() -> bool:
     return os.environ.get("TRANSMUTE_DISABLE_GPU", "").lower() in ("1", "true", "yes")
 
 
+class ProbeCancelled(RuntimeError):
+    """User cancelled a running benchmark; caller keeps the previous report."""
+
+
+_BENCH_BACKEND_WORDS = {
+    "cpu": "your CPU", "nvidia-nvenc": "NVIDIA graphics",
+    "va-api": "graphics (VA-API)", "intel-oneapi": "Intel Quick Sync",
+    "amd-amf": "AMD graphics (AMF)",
+}
+
+
 def _render_nodes() -> list:
     try:
         return sorted(Path("/dev/dri").glob("renderD*"))
@@ -486,11 +497,25 @@ class CapabilityProber:
 
     def __init__(self, engines: EngineManager | None = None):
         self.engines = engines or EngineManager()
+        self._progress = None
+        self._cancel = None
+
+    def _note(self, done: int, total: int, what: str) -> None:
+        if self._progress is not None:
+            self._progress(done, total, what)
 
     # -- public ------------------------------------------------------------
-    def report(self, refresh: bool = False) -> CapabilityReport:
-        """Cached report when valid; re-probes when ffmpeg/Pillow identities change."""
+    def report(self, refresh: bool = False, progress=None,
+               cancel=None) -> CapabilityReport:
+        """Cached report when valid; re-probes when ffmpeg/Pillow identities
+        change. progress(done:int,total:int,what:str) is called from the
+        CALLING thread (benchmark UI needs a real bar, not vibes);
+        cancel: Callable[[],bool] -> abandons the re-probe with
+        ProbeCancelled."""
         store = CapabilityCache(paths().capability_cache)
+        self._progress = progress
+        self._cancel = cancel
+        self._note(0, 0, "looking up installed engines")
         engines = self.engines.detect()
         ffmpeg = engines["ffmpeg"].path if engines["ffmpeg"].status == STATUS_OK else None
         ffprobe = engines["ffprobe"].path if engines["ffprobe"].status == STATUS_OK else None
@@ -520,10 +545,17 @@ class CapabilityProber:
             if not enc_list.ok:
                 caveats.append("ffmpeg -encoders failed; capability report is partial.")
             declared = _parse_encoder_list(enc_list.stdout) if enc_list.ok else []
+            total = len(declared)
+            self._note(0, total, "looking up encoders on this machine")
             # device gate: on POSIX, no device nodes => nothing for hw encoders to open.
             hw_possible = gpu_nodes["dri_render"] or gpu_nodes["nvidia"]
-            for name, codec in declared:
+            for i, (name, codec) in enumerate(declared, 1):
+                if self._cancel is not None and self._cancel():
+                    raise ProbeCancelled("benchmark cancelled")
                 cls = _classify(name, codec)
+                self._note(i - 1, total,
+                           _BENCH_BACKEND_WORDS.get(cls["backend"],
+                                                    cls["backend"]))
                 cap = EncoderCapability(name=name, codec=cls["codec"], backend=cls["backend"],
                                         hw=cls["hw"], verified=False, fps=None,
                                         compat_flag=cls.get("compat", False))
@@ -556,6 +588,7 @@ class CapabilityProber:
                 cap.fps = fps
                 cap.reason = reason if not ok else ""
                 caps.append(cap)
+            self._note(total, total, "checking HDR tone-map chain")
             filters = _probe_ffmpeg_filters(ffmpeg)
 
         if disable_gpu:

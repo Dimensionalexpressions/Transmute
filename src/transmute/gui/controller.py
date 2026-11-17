@@ -8,6 +8,7 @@ controller must never import PySide6.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -110,6 +111,42 @@ class ConverterController:
                 finally:
                     if prev is not None:
                         set_paths(prev)
+        return self._report
+
+    # ------------------------------------------------------------- prefs
+    def _prefs_file(self) -> Path:
+        from ..paths import paths as get_paths
+        root = self._paths if self._paths is not None else get_paths()
+        return root.config_dir / "preferences.json"
+
+    def prefs(self) -> dict:
+        try:
+            return json.loads(self._prefs_file().read_text("utf-8"))
+        except Exception:
+            return {}
+
+    def set_pref(self, key: str, value) -> None:
+        data = self.prefs()
+        data[key] = value
+        f = self._prefs_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data, indent=1), "utf-8")
+
+    def reprobe(self) -> CapabilityReport:
+        """Benchmark button: re-measure THIS machine from scratch (cache
+        bypassed, old entry superseded - results always come from the
+        hardware the app is actually running on)."""
+        from ..paths import paths as get_paths, set_paths
+        prev = None
+        if self._paths is not None:
+            prev = get_paths()
+            set_paths(self._paths)
+        try:
+            self._report = CapabilityProber().report(refresh=True)
+        finally:
+            if prev is not None:
+                set_paths(prev)
+        self._vaapi_cache = None  # devices may have changed
         return self._report
 
     @property
@@ -289,9 +326,14 @@ class ConverterController:
         if text:
             lines.append(text)
         base = target.split(" ")[0]
-        tried = [e for e in getattr(self.report, "encoders", [])
-                 if e.verified and e.fps and (e.codec == base
-                                              or e.name == base)]
+        rel = [e for e in getattr(self.report, "encoders", [])
+               if e.verified and (e.codec == base or e.name == base)]
+        tried = [e for e in rel if e.fps]
+        if not tried and rel:
+            # Works on this machine (it encoded), just never finished the
+            # benchmark in time - say so instead of showing nothing.
+            lines.append("Works here, but this PC could not finish the speed "
+                         "benchmark - expect slow conversions.")
         if tried:
             tried.sort(key=lambda e: -e.fps)
             # one line per DEVICE (fastest encoder of it), not per raw
@@ -301,17 +343,24 @@ class ConverterController:
                 per_dev.setdefault(self._device_word(e), e)
             devs = list(per_dev.values())
             best = devs[0]
-            if len(devs) > 1:
+            # user directive (screenshot feedback): RECOMMEND the graphics
+            # card whenever this format has one that works here - it keeps
+            # the CPU free; recommend CPU only when no GPU can encode this.
+            hw = [e for e in devs if getattr(e, "hw", False)]
+            summary = (
+                "On this PC: "
+                + ", ".join(f"{self._device_word(e)} "
+                            f"{self._speed_word(e.fps)}" for e in devs))
+            if hw:
+                lines.append(summary + ".")
                 lines.append(
-                    "On this PC: "
-                    + ", ".join(f"{self._device_word(e)} "
-                                f"{self._speed_word(e.fps)}"
-                                for e in devs)
-                    + f" - fastest: {self._device_word(best)}.")
+                    f"Recommended: {self._device_word(hw[0])} - it leaves "
+                    "your CPU free while you work.")
             else:
                 lines.append(
-                    f"On this PC: {self._device_word(best)} "
-                    f"{self._speed_word(best.fps)}.")
+                    summary
+                    + (f" - fastest: {self._device_word(best)}."
+                       if len(devs) > 1 else "."))
             if encoder:
                 sel = next((e for e in tried
                             if e.name == encoder.rsplit("/", 1)[-1]), None)

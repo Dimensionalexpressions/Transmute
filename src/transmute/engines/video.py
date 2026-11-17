@@ -27,7 +27,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..probe.capability import CapabilityProber, EncoderCapability, TONEMAP_VFILTER
+from ..probe.capability import (CapabilityProber, EncoderCapability,
+                             TONEMAP_VFILTER, gpu_force_disabled)
 from ..probe.engines import EngineManager
 from .base import Availability, EngineResult, run_command
 from .media import (Probe, extract_video_bitstream_sha256, is_hdr_transfer,
@@ -91,6 +92,10 @@ class VideoEngine:
                      prefer_hw: bool | None) -> EncoderCapability | None:
         report = self.prober.report()
         cands = report.verified_encoders(codec)
+        if gpu_force_disabled():
+            # user switched "use graphics card" off in More…: honour it at
+            # selection time too, not just in the (possibly stale) report
+            cands = [c for c in cands if not c.hw]
         if want_10bit:
             cands = [c for c in cands
                      if (not c.hw) and c.depth.get("10")]  # hw depth driver-dependent: untested

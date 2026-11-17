@@ -59,7 +59,10 @@ class TestHwTrialCommands:
         joined = [" ".join(map(str, cmd)) for cmd in cmds]
         assert len(cmds) == 2
         assert "renderD128" in joined[0] and "renderD129" in joined[1]
-        assert all("320x320" in j for j in joined), "hw samples must exceed NVENC's min size"
+        assert all("1280x720" in j for j in joined), (
+            "hw samples must exceed NVENC min size AND be big enough to "
+            "measure real-world speed (user directive: numbers reflect "
+            "THIS machine's hardware, benchmark-style)")
 
     def test_nvenc_trial_never_forces_nv12_system_frames(self):
         from pathlib import Path

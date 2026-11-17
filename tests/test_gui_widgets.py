@@ -130,6 +130,27 @@ class TestPickersMirrorTheReport:
         # desktop fonts; full patent note stays in the item tooltip.
         assert any("av1" in t and "✓" in t for t in texts)
 
+    def test_gpu_switch_persists_and_remeasures(self, window, monkeypatch):
+        """User directive: the GPU switch lives in More… and off means the
+        report must stop claiming GPU support - so toggling re-measures."""
+        calls = []
+        # stub the TRIGGER (the real one spawns a measuring thread - no
+        # racing a worker inside a unit test)
+        monkeypatch.setattr(window, "_start_reprobe", lambda: calls.append(1))
+        monkeypatch.delenv("TRANSMUTE_DISABLE_GPU", raising=False)
+        # drive from a known state: outer pytest env may have started the
+        # switch off already, and toggling to the SAME state fires no signal
+        window.chk_gpu.setChecked(True)
+        calls.clear()
+        window.chk_gpu.setChecked(False)
+        assert window.ctrl.prefs().get("use_gpu") is False
+        assert os.environ.get("TRANSMUTE_DISABLE_GPU") == "1"
+        assert calls == [1]
+        window.chk_gpu.setChecked(True)
+        assert window.ctrl.prefs().get("use_gpu") is True
+        assert "TRANSMUTE_DISABLE_GPU" not in os.environ
+        assert calls == [1, 1]
+
 
 class TestFileList:
     def test_unsupported_type_disabled(self, window, tmp_path):

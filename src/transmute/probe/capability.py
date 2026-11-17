@@ -38,7 +38,10 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 8  # 7 -> 8: libx264-family trial used crf 55, which is
+SCHEMA_VERSION = 9  # 8 -> 9: benchmark sample raised to 1280x720 (numbers must
+# reflect THIS machine under realistic load, not a tiny clip that flatters CPUs);
+# a timed-out trial now means "works, too slow to measure", never "unavailable".
+SCHEMA_VERSION_PREV = 8  # 7 -> 8: libx264-family trial used crf 55, which is
                     # out of x265's 0..51 range - HEVC showed as unavailable
                     # on machines with a perfectly working x265.
                     # 6 -> 7: hw trials rebuilt (320px sample, per-render-
@@ -199,7 +202,7 @@ class CapabilityReport:
     def verified_encoders(self, codec: str) -> list[EncoderCapability]:
         """Verified encoders for a codec, fastest measured first (F10 ladder)."""
         got = [e for e in self.encoders if e.verified and e.codec == codec]
-        return sorted(got, key=lambda e: -(e.fps or 0))
+        return sorted(got, key=lambda e: (e.fps is None, -(e.fps or 0.0), not e.hw))
 
     def row(self, category: str, target: str) -> MatrixRow | None:
         for r in self.matrix:
@@ -291,7 +294,7 @@ def _trial_cmds(ffmpeg: Path, cap: EncoderCapability) -> list[list[Any]]:
       render node becomes its own candidate instead of blindly taking [0].
     """
     base: list[Any] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
-    frames: list[Any] = ["-f", "lavfi", "-i", "testsrc2=size=320x320:rate=25:duration=1",
+    frames: list[Any] = ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=1",
                          "-frames:v", "24"]
     tail = SW_ENCODER_INFO.get(cap.name, {}).get("trial", [])
     if cap.hw:
@@ -332,12 +335,17 @@ def _run_trial(cmd: list[Any]) -> tuple[bool, float | None, str]:
     is fair; we deliberately do NOT parse ffmpeg's 'speed=' line because
     -loglevel error suppresses it and stderr must stay clean for reasons.
     """
-    res = run_command(cmd, timeout_s=25)
+    res = run_command(cmd, timeout_s=60)
     if res.ok:
         fps = 24.0 / max(res.seconds, 0.01)
         return True, fps, ""
     if res.timed_out:
-        return False, None, "trial encode timed out (25s)"
+        # Multi-hardware honesty: a timeout proves the encoder RAN (ffmpeg
+        # alive, codec accepted) - it does not prove absence. Weak machines
+        # must see the codec as available, speed unmeasured, never falsely
+        # "unavailable: timed out" (user directive: measure THEIR hardware,
+        # never penalise it).
+        return True, None, "ran, but slower than the 60 s benchmark cap"
     tail = _stderr_tail(res.stderr_text)
     return False, None, tail or f"trial encode failed (exit {res.returncode})"
 
@@ -347,11 +355,18 @@ def _run_trials(cmds: list[list[Any]]) -> tuple[bool, float | None, str]:
     node - the reason kept is from the last node so a mixed GPU box never
     claims 'entrypoint missing' when some node encoded fine a moment ago)."""
     reason = ""
+    got: tuple[bool, float | None, str] = (False, None, "")
     for cmd in cmds:
         ok, fps, r = _run_trial(cmd)
         if ok:
-            return True, fps, ""
+            got = (True, fps, r)
+            if fps is not None:
+                return got
+            # unmeasured-but-working: keep probing other candidates (e.g. a
+            # second render node) in search of a measured number
         reason = r or reason
+    if got[0]:
+        return got
     return False, None, reason
 
 

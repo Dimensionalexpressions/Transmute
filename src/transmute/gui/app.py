@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import queue as pyqueue
 import sys
+import os
 import threading
 from pathlib import Path
 
@@ -30,10 +31,15 @@ class MainWindow(QMainWindow):
     # (QTimer.singleShot from a non-GUI thread is a trap - kills timers
     # from the wrong thread at teardown)
     run_done = Signal()
+    reprobe_done = Signal()
 
     def __init__(self, controller: ConverterController | None = None) -> None:
         super().__init__()
         self.ctrl = controller or ConverterController()
+        # persisted GPU pref must be in place BEFORE any probe runs,
+        # so the report never claims GPU support the user switched off
+        if self.ctrl.prefs().get("use_gpu", True) is False:
+            os.environ["TRANSMUTE_DISABLE_GPU"] = "1"
         self._worker: threading.Thread | None = None
         # watch-folders state (F24): the watcher thread only posts text lines
         # into the SimpleQueue; everything else happens on the GUI thread.
@@ -42,6 +48,7 @@ class MainWindow(QMainWindow):
         self._watch_events: pyqueue.SimpleQueue[str] = pyqueue.SimpleQueue()
         self._watch_more = False                 # watch jobs await a worker
         self.run_done.connect(self._on_worker_done)
+        self.reprobe_done.connect(self._on_reprobe_done)
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
         self.setAcceptDrops(True)
@@ -157,6 +164,16 @@ class MainWindow(QMainWindow):
         self._warn_c = ("color:#e6b45a;" if _dark else "color:#b3541e;")
         self._ok_c = ("color:#7cc47f;" if _dark else "color:#2e7d32;")
         rv.addRow(self.lbl_about)
+
+        # user directive: every number shown must come from THIS machine's
+        # hardware - measured at startup, or re-measured here on demand.
+        self.btn_bench = QPushButton("Re-benchmark this PC")
+        self.btn_bench.setToolTip(
+            "Test-encodes a 720p sample on every encoder found here, then "
+            "updates the speed words above. Takes about a minute; safe to "
+            "run any time.")
+        self.btn_bench.clicked.connect(self._start_reprobe)
+        rv.addRow("", self.btn_bench)
         self.enc_box = QComboBox()
         self.enc_box.currentIndexChanged.connect(
             lambda *_: (self._update_enc_note(),
@@ -183,6 +200,21 @@ class MainWindow(QMainWindow):
             "Default only replaces audio when the target container rejects "
             "the existing codec; this forces it always.")
         rv.addRow("", self.chk_audio_replace)
+
+        # More… options (user directive): the graphics-card switch changes
+        # what the capability report may claim - off means CPU-only truth.
+        more = QGroupBox("More…")
+        mform = QFormLayout(more)
+        self.chk_gpu = QCheckBox("Use graphics card if it is faster (recommended)")
+        self.chk_gpu.setChecked(os.environ.get(
+            "TRANSMUTE_DISABLE_GPU", "").lower() not in ("1", "true", "yes"))
+        self.chk_gpu.setToolTip(
+            "Off: the app will not use or recommend GPU encoders on this\n"
+            "machine - the capability report is re-measured without them.\n"
+            "Graphics encoding keeps your CPU free but files can be larger.")
+        self.chk_gpu.toggled.connect(self._on_gpu_toggle)
+        mform.addRow(self.chk_gpu)
+        rv.addRow(more)
         qlrow = QHBoxLayout()
         self.rad_crf = QRadioButton("Quality (CRF)")
         self.rad_crf.setChecked(True)
@@ -370,6 +402,46 @@ class MainWindow(QMainWindow):
         self.enc_box.setEnabled(bool(ladder))
         self._update_enc_note()
         self._sync_options_enabled()
+
+    def _on_gpu_toggle(self, on: bool) -> None:
+        self.ctrl.set_pref("use_gpu", bool(on))
+        if on:
+            os.environ.pop("TRANSMUTE_DISABLE_GPU", None)
+        else:
+            os.environ["TRANSMUTE_DISABLE_GPU"] = "1"
+        # the report must match the switch: re-measure this machine now
+        self._start_reprobe()
+
+    def _start_reprobe(self) -> None:
+        if (self._worker is not None and self._worker.is_alive()) or \
+                not self.btn_bench.isEnabled():
+            return  # a conversion is hogging the CPUs - measure later
+        self.btn_bench.setEnabled(False)
+        self.btn_bench.setText("Measuring this PC… about a minute")
+        self.lbl_about.setText("")
+        self._toggle_row(self._row["about"], False)
+        threading.Thread(target=self._reprobe_body, daemon=True).start()
+
+    def _reprobe_body(self) -> None:
+        # OFF the GUI thread: touch no widgets; signal only.
+        try:
+            self.ctrl.reprobe()
+        finally:
+            self.reprobe_done.emit()
+
+    def _on_reprobe_done(self) -> None:
+        self.btn_bench.setEnabled(True)
+        self.btn_bench.setText("Re-benchmark this PC")
+        cat = self.cat_box.currentText()
+        prev = self._current_target()
+        self._load_targets(cat)
+        if prev:  # keep the user's pick when this machine can still do it
+            for i in range(self.tgt_box.count()):
+                item = self.tgt_box.model().item(i)
+                if item.data(Qt.ItemDataRole.UserRole) == prev and \
+                        item.isEnabled():
+                    self.tgt_box.setCurrentIndex(i)
+                    break
 
     def _update_about(self) -> None:
         """Details block: what the chosen target means in plain words + the

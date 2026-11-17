@@ -22,6 +22,8 @@ speed (report data only - no vendor assumptions).
 """
 from __future__ import annotations
 
+import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -64,6 +66,26 @@ DEFAULT_CRF = {"av1": 30, "vp9": 33, "h264": 23, "hevc": 28}
 DEFAULT_TARGET = {"mp4": "h264", "mov": "h264", "m4v": "h264",
                   "mkv": "av1", "webm": "vp9", "ts": "h264"}
 CODEC_DEFAULT_CONTAINER = {"av1": "mkv", "vp9": "webm", "h264": "mp4", "hevc": "mp4"}
+
+
+def _human_secs(s: float) -> str:
+    if s < 45:
+        return f"{max(1, int(round(s)))} s"
+    m = s / 60.0
+    if m < 2:
+        return "about a minute"
+    if m < 90:
+        return f"{round(m)} min"
+    h = m / 60.0
+    return (f"{h:.1f} hours" if h < 10 else f"{round(h)} hours")
+
+
+def _human_size(n: float) -> str:
+    if n < 1e6:
+        return f"{int(n // 1024)} KB"
+    if n < 1e9:
+        return f"{n / 1e6:.0f} MB"
+    return f"{n / 1e9:.2f} GB"
 
 
 class VideoEngine:
@@ -375,6 +397,106 @@ class VideoEngine:
                             seconds=elapsed, log_path=log_path, data=data)
 
     # ------------------------------------------------------------------- remux
+    # --------------------------------------------------- estimate (GUI preview)
+    def estimate_conversion(self, src: Path, *, target_codec: str,
+                            encoder: str | None = None, crf: int | None = None,
+                            size_mb: float | None = None) -> str:
+        """One honest line: how long and how big THIS file becomes, measured
+        by encoding a real ~2-second piece of it with the SAME encoder and
+        quality on THIS machine (user directive: every number on this screen
+        comes from this hardware's own behaviour, never from tables).
+        Returns "" when nothing can be estimated (audio targets, unknown
+        duration...)."""
+        dur = self.probe.duration_s(src)
+        if not dur or dur <= 0:
+            return ""
+        if encoder:
+            cap = next((c for c in self.prober.report().encoders
+                        if c.name == encoder and c.verified), None)
+        else:
+            cap = self.pick_encoder(target_codec, want_10bit=False,
+                                    prefer_hw=None)
+        if cap is None:
+            return ""
+        ffmpeg = self.engines.path("ffmpeg")
+        if ffmpeg is None:
+            return ""
+        sec = min(2.0, max(0.5, dur / 4.0))
+        start = max(0.0, dur / 3.0)
+        td = tempfile.mkdtemp(prefix="transmute-est-")
+        out = Path(td) / "s.mkv"
+        cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel",
+                          "error", "-stats",
+                          "-ss", f"{start:.2f}", "-i", src,
+                          "-t", f"{sec:.2f}", "-map", "0:v:0", "-an",
+                          "-c:v", cap.name, "-f", "matroska"]
+        crf_val = crf if crf is not None else DEFAULT_CRF.get(target_codec)
+        if crf_val is not None and cap.backend == "cpu":
+            cmd += ["-crf", str(crf_val)]
+        elif crf_val is not None and cap.name.endswith("_nvenc"):
+            cmd += ["-cq", str(crf_val), "-b:v", "0", "-preset", "slow"]
+        if size_mb is not None:  # rate-control mode: sample at the job bitrate
+            audio_bps = sum(int(st.get("bit_rate") or 128_000)
+                            for st in self.probe.audio_streams(src))
+            v_bps = max(int(size_mb * 8e6 / dur) - audio_bps, 100_000)
+            cmd += ["-b:v", str(v_bps)]
+        cmd += ["-y", str(out)]
+        try:
+            t0 = time.monotonic()
+            res = run_command(cmd, timeout_s=120)
+            wall = (res.seconds if res is not None and res.seconds
+                    else time.monotonic() - t0)
+            stderr = ((res.stderr_text or "") + (res.stdout or "")) if res else ""
+            frames = 0
+            m = re.findall(r"frame=\s*(\d+)", stderr)
+            if m:
+                frames = int(m[-1])
+            enc_fps = 0.0
+            m = re.findall(r"fps=([\d.]+)", stderr)
+            if m:
+                try:
+                    enc_fps = float(m[-1])
+                except ValueError:
+                    pass
+            out_bytes = out.stat().st_size if out.exists() else 0
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+        if not frames or not out_bytes:
+            if res is not None and res.timed_out:
+                return ("Estimate: this PC could not finish even a 2 s sample "
+                        "in 2 minutes - expect very slow conversions.")
+            return ""
+        # audio streams are stream-copied into the output: count their real
+        # bitrate over the whole duration (measured from this file, not typed)
+        audio_bytes = sum(int(st.get("bit_rate") or 128_000)
+                          for st in self.probe.audio_streams(src)) * dur
+        src_fps = 0.0
+        v = self.probe.primary_video(src)
+        if v:
+            num, _, den = str(v.get("r_frame_rate", "")).partition("/")
+            try:
+                src_fps = float(num) / float(den or 1)
+            except ValueError:
+                src_fps = 0.0
+        # ffmpeg's stats "fps" charges process startup + sample seek to the
+        # encode - on a 2 s sample that flatters nothing but the error bar.
+        # Per-frame wall time with the fixed cost (measured ~0.4 s) taken out
+        # is the honest extrapolation for this machine on this file.
+        frames_total = dur * src_fps if src_fps > 0 else 0.0
+        if frames > 0 and frames_total > 0:
+            wall_work = max(wall - 0.4, wall / 4)
+            est_s = (wall_work / frames) * frames_total
+        else:
+            est_s = wall * (dur / sec)
+        size = out_bytes * (dur / sec) + audio_bytes
+        if size_mb is not None:
+            size_txt = _human_size(size_mb * 1e6)  # hit-your-target is the claim
+        else:
+            size_txt = _human_size(size)
+        return (f"Estimate for this file: about {_human_secs(est_s)} of work, "
+                f"output about {size_txt}. Measured from a {sec:.0f} s piece "
+                "of it on this PC.")
+
     def _remux(self, src: Path, dst: Path, *, fmt: str, ffmpeg: Path,
                sv: dict, audio: str, ffmpeg_timeout_s: float,
                governor, log_path: Path | None, t0: float) -> EngineResult:

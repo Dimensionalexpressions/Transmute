@@ -89,6 +89,9 @@ class ConverterController:
         # single reusable preview dir: each first_frame() call replaces the
         # previous PNG in place - no temp dir per click
         self._preview_dir: Path | None = None
+        # per-(file, choices) measured estimates; see conversion_estimate()
+        self._est_cache: dict = {}
+        self._video_engine = None
 
     # ------------------------------------------------------------- report
     @property
@@ -131,6 +134,47 @@ class ConverterController:
         f = self._prefs_file()
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(data, indent=1), "utf-8")
+
+    def conversion_estimate(self, cat: str, target: str, src, *,
+                            encoder: str = "", crf: int | None = None,
+                            size_mb: float | None = None) -> str:
+        """One-line time+size estimate for THIS file. Every number comes from
+        encoding a real piece of the file with the chosen encoder on THIS
+        machine (user directive: hardware-measured, never table-guessed).
+        "" when there is nothing honest to say."""
+        from pathlib import Path
+        if cat != "video" or not target or not src:
+            return ""
+        try:
+            mt = Path(src).stat().st_mtime_ns
+        except OSError:
+            return ""
+        key = (str(src), mt, target, encoder, crf, size_mb)
+        cached = self._est_cache.get(key)
+        if cached is not None:
+            return cached
+        if self._video_engine is None:
+            from ..engines.video import VideoEngine
+            self._video_engine = VideoEngine()
+        from ..paths import paths as get_paths, set_paths
+        prev = None
+        if self._paths is not None:
+            prev = get_paths()
+            set_paths(self._paths)
+        line = ""
+        try:
+            line = self._video_engine.estimate_conversion(
+                Path(src), target_codec=target, encoder=encoder or None,
+                crf=crf, size_mb=size_mb)
+        except Exception:
+            line = ""  # estimate is advisory - never break the GUI over it
+        finally:
+            if prev is not None:
+                set_paths(prev)
+        if len(self._est_cache) > 64:
+            self._est_cache.clear()
+        self._est_cache[key] = line
+        return line
 
     def reprobe(self, progress=None, cancel=None) -> CapabilityReport:
         """Benchmark button: re-measure THIS machine from scratch (cache

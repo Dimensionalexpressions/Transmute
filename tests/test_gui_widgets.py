@@ -9,6 +9,7 @@ All decision logic is already proven in test_gui_controller.py.
 from __future__ import annotations
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -129,6 +130,31 @@ class TestPickersMirrorTheReport:
         # (!) replaces the emoji badge: it rendered as a broken box on some
         # desktop fonts; full patent note stays in the item tooltip.
         assert any("av1" in t and "✓" in t for t in texts)
+
+    def test_estimate_line_shown_for_added_file(self, window, monkeypatch,
+                                                tmp_path):
+        """User directive: with files chosen, the panel must state measured
+        time and output size - numbers from this PC, never table guesses."""
+        from PySide6.QtTest import QTest
+        monkeypatch.setattr(window, "_current_target", lambda: "h264")
+        monkeypatch.setattr(window, "_target_info", lambda c, t: None)
+        monkeypatch.setattr(window.ctrl, "conversion_estimate",
+                            lambda *a, **k: ("Estimate for this file: about "
+                                             "1 min of work, output about "
+                                             "5 MB. Measured from a 2 s "
+                                             "piece of it on this PC."))
+        window.cat_box.setCurrentText("video")
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x")
+        window._add_one(clip)
+        window._est_run()  # bypass the debounce timer
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            QTest.qWait(50)
+            if (window.lbl_est.isVisible()
+                    and "Estimate for this file" in window.lbl_est.text()):
+                break
+        assert "output about 5 MB" in window.lbl_est.text()
 
     def test_gpu_switch_persists_and_remeasures(self, window, monkeypatch):
         """User directive: the GPU switch lives in More… and off means the

@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
     reprobe_done = Signal()
     bench_note = Signal(int, int, str)   # done, total, what (worker -> GUI)
     bench_failed = Signal(str)           # "" ok; otherwise the machine's reason
+    est_done = Signal(int, str)          # generation, estimate line ("" = none)
 
     def __init__(self, controller: ConverterController | None = None) -> None:
         super().__init__()
@@ -53,6 +54,7 @@ class MainWindow(QMainWindow):
         self.reprobe_done.connect(self._on_reprobe_done)
         self.bench_note.connect(self._on_bench_note)
         self.bench_failed.connect(self._on_bench_failed)
+        self.est_done.connect(self._on_est_done)
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
         self.setAcceptDrops(True)
@@ -171,6 +173,18 @@ class MainWindow(QMainWindow):
 
         # user directive: every number shown must come from THIS machine's
         # hardware - measured at startup, or re-measured here on demand.
+        self.lbl_est = QLabel("")
+        self.lbl_est.setWordWrap(True)
+        self.lbl_est.hide()
+        if _dark:
+            self.lbl_est.setStyleSheet(
+                "color:#a3ccc6;background:#26332f;border-radius:6px;"
+                "padding:6px;")
+        else:
+            self.lbl_est.setStyleSheet(
+                "color:#2f5f59;background:#eef6f5;border-radius:6px;"
+                "padding:6px;")
+        rv.addRow(self.lbl_est)
         self.btn_bench = QPushButton("Re-benchmark this PC")
         self.btn_bench.setToolTip(
             "Test-encodes a 720p sample on every encoder found here, then "
@@ -249,6 +263,8 @@ class MainWindow(QMainWindow):
             "control); the report says whether the result is within budget.")
         for w in (self.rad_crf, self.rad_size):
             w.toggled.connect(self._sync_options_enabled)
+        self.crf_box.valueChanged.connect(lambda *_: self._est_dirty())
+        self.size_box.valueChanged.connect(lambda *_: self._est_dirty())
         qlrow.addWidget(self.rad_crf)
         qlrow.addWidget(self.crf_box)
         qlrow.addWidget(self.rad_size)
@@ -351,11 +367,13 @@ class MainWindow(QMainWindow):
         self.files.addItem(it)
         self._update_hdr(path)
         self._update_remux_status()
+        self._est_dirty()
 
     def _remove_selected(self) -> None:
         for it in self.files.selectedItems():
             self.files.takeItem(self.files.row(it))
         self._update_remux_status()
+        self._est_dirty()
 
     def _choose_dst(self) -> None:
         d = QFileDialog.getExistingDirectory(
@@ -431,6 +449,55 @@ class MainWindow(QMainWindow):
         # the report must match the switch: re-measure this machine now
         self._start_reprobe()
 
+    # ------------------------------------------------ estimate (measured here)
+    def _est_dirty(self) -> None:
+        QTimer.singleShot(700, self._est_run)  # coax: one sample per burst
+
+    def _est_run(self) -> None:
+        if not hasattr(self, "lbl_est"):
+            return  # construction order
+        cat = self.cat_box.currentText()
+        target = self._current_target()
+        src = ""
+        if cat == "video" and target and self.files.count():
+            src = self.files.item(0).data(Qt.ItemDataRole.UserRole) or ""
+        if not src or (self._worker is not None and self._worker.is_alive()):
+            self.lbl_est.hide()
+            return
+        tinfo = self._target_info(cat, target)
+        if tinfo is not None and not tinfo.available:
+            self.lbl_est.hide()
+            return
+        self._est_gen = getattr(self, "_est_gen", 0) + 1
+        g = self._est_gen
+        self.lbl_est.setText("Measuring an estimate on this PC…")
+        self.lbl_est.show()
+        encoder = self.enc_box.currentData() or ""
+        crf = self.crf_box.value() if self.rad_crf.isChecked() else None
+        size_mb = self.size_box.value() if self.rad_size.isChecked() else None
+        threading.Thread(target=self._est_body, daemon=True,
+                         args=(g, cat, target, src, encoder, crf,
+                               size_mb)).start()
+
+    def _est_body(self, g, cat, target, src, encoder, crf,
+                  size_mb) -> None:
+        # OFF the GUI thread: touch no widgets; signal only.
+        try:
+            line = self.ctrl.conversion_estimate(
+                cat, target, src, encoder=encoder, crf=crf, size_mb=size_mb)
+        except Exception:
+            line = ""
+        self.est_done.emit(g, line)
+
+    def _on_est_done(self, g: int, line: str) -> None:
+        if not hasattr(self, "lbl_est") or g != getattr(self, "_est_gen", 0):
+            return  # stale: the user changed their mind mid-sample
+        if line:
+            self.lbl_est.setText(line)
+            self.lbl_est.show()
+        else:
+            self.lbl_est.hide()
+
     def _start_reprobe(self) -> None:
         if self._bench_live:
             # button doubles as Cancel: probe raises ProbeCancelled, the
@@ -449,6 +516,7 @@ class MainWindow(QMainWindow):
         self.lbl_bench.setText("Looking up installed engines…")
         self.lbl_bench.show()
         self.lbl_about.setText("")
+        self.lbl_est.hide()
         self._toggle_row(self._row["about"], False)
         threading.Thread(target=self._reprobe_body, daemon=True).start()
 
@@ -517,6 +585,7 @@ class MainWindow(QMainWindow):
             lines = self.ctrl.about_lines(
                 cat, target, self.enc_box.currentData() or "")
         self.lbl_about.setText("\n".join(lines))
+        self._est_dirty()
         self.lbl_about.setVisible(bool(lines))
         self._toggle_row(self._row["about"], bool(lines))
 

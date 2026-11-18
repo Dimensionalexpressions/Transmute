@@ -53,8 +53,10 @@ _GPU_NAME_FALLBACK = {
 
 
 def _gpu_gpu_tools_enabled() -> bool:
-    # with GPU probing switched off (tests, VRAM-occupied boxes) the generic
-    # names are honest and we skip subprocesses entirely
+    """GPU ENCODE MEASUREMENT switch (probe + picker reasons). It gates
+    encoders, never the device INVENTORY: reading a name from nvidia-smi or
+    lspci encodes nothing, so the picker keeps showing real device names and
+    says honestly "switched off" instead of pretending the device is gone."""
     import os
     return os.environ.get("TRANSMUTE_DISABLE_GPU", "").lower() not in (
         "1", "true", "yes")
@@ -105,7 +107,7 @@ def nvidia_gpu_names() -> list[str]:
     """Exact per-GPU names when the NVIDIA driver's tool is present."""
     import shutil
     import subprocess
-    if not _gpu_gpu_tools_enabled() or not shutil.which("nvidia-smi"):
+    if not shutil.which("nvidia-smi"):
         return []
     try:
         p = subprocess.run(
@@ -139,7 +141,7 @@ def lspci_product(slot: str) -> str:
     the entry is absent - the caller then uses a vendor word)."""
     import shutil
     import subprocess
-    if not slot or not _gpu_gpu_tools_enabled() or not shutil.which("lspci"):
+    if not slot or not shutil.which("lspci"):
         return ""
     try:
         p = subprocess.run(["lspci", "-s", slot], capture_output=True,
@@ -510,22 +512,32 @@ class ConverterController:
         if cached is not None and cached[0] is report:
             return cached[1]
         rows = list(getattr(report, "encoders", []))
+        gpu_off = not _gpu_gpu_tools_enabled()
 
-        def status(backends: tuple[str, ...]) -> tuple[bool, str]:
+        def status(backends: tuple[str, ...]) -> tuple[bool, str, bool]:
+            """(works, why, switched_off). Measurement OFF outranks any
+            cached verdict: a device the app is not looking at right now is
+            switched off, and showing its stale last-known failure as the
+            current state would be the machine's yesterday, not its truth.
+            Pick it (or Auto) and the re-probe replaces this with measured
+            facts."""
+            if gpu_off and "cpu" not in backends:
+                return False, ("GPU use is switched off - pick Auto or "
+                               "this device and Transmute measures it here"), True
             mine = [e for e in rows if e.backend in backends]
             if any(e.verified for e in mine):
-                return True, ""
+                return True, "", False
             for e in mine:
                 if e.reason or e.skipped:
-                    return False, (e.reason or e.skipped)
+                    return False, (e.reason or e.skipped), False
             if mine:
-                return False, "never verified on this machine"
-            return False, "no encoder for it in this ffmpeg build"
+                return False, "never verified on this machine", False
+            return False, "no encoder for it in this ffmpeg build", False
 
-        ok, why = status(("cpu",))
+        ok, why, _off = status(("cpu",))
         devs: list[dict[str, Any]] = [{
             "id": "cpu", "kind": "cpu", "name": cpu_model(),
-            "backends": ["cpu"], "works": ok, "why": why,
+            "backends": ["cpu"], "works": ok, "why": why, "disabled": False,
         }]
         gpu_nodes = gpu_render_nodes()
         nv_names = nvidia_gpu_names()
@@ -547,10 +559,11 @@ class ConverterController:
                     or _GPU_NAME_FALLBACK.get(driver, "your GPU"))
                 if count > 1:
                     name = f"{name} ({count} identical GPUs)"
-            ok, why = status(tuple(backends))
+            ok, why, off = status(tuple(backends))
             devs.append({
                 "id": f"gpu:{driver}:{devid}", "kind": "gpu", "name": name,
                 "backends": backends, "works": ok, "why": why,
+                "disabled": off,
             })
         self._devices_cache = (report, devs)
         return devs

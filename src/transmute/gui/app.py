@@ -641,7 +641,10 @@ class MainWindow(QMainWindow):
             label = ("CPU - " if d["kind"] == "cpu" else "GPU - ") + d["name"]
             tip = d["name"]
             if not d["works"]:
-                label += "  (not working here)"
+                # "not working" and "switched off" are DIFFERENT truths -
+                # conflating them made a healthy GPU look broken (user, 2026-11)
+                label += ("  (switched off)" if d.get("disabled")
+                          else "  (not working here)")
                 tip = f"{d['name']} - why: {d['why']}"
             self.device_box.addItem(label, d["id"])
             self.device_box.setItemData(self.device_box.count() - 1, tip,

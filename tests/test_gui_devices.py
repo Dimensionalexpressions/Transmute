@@ -89,12 +89,14 @@ class TestDevicesListing:
         assert by_id["gpu:amdgpu:0x13c0"]["name"] == \
             "Granite Ridge [Radeon Graphics]"
 
-    def test_broken_gpu_stays_visible_with_its_reason(self, ctrl):
+    def test_broken_gpu_stays_visible_with_its_reason(self, ctrl, monkeypatch):
         """Doctrine: nothing is hidden; the machine's probe words travel
-        with the entry so the picker can say WHY it is marked off."""
+        with the entry so the picker can say WHY it is marked off. This is
+        the state WHILE MEASURING - the off-switch case is tested below."""
+        monkeypatch.delenv("TRANSMUTE_DISABLE_GPU", raising=False)
         nv = next(d for d in ctrl.devices() if d["kind"] == "gpu"
                   and "nvidia" in d["id"])
-        assert nv["works"] is False
+        assert nv["works"] is False and nv["disabled"] is False
         assert "-22" in nv["why"]
         amd = next(d for d in ctrl.devices() if d["id"].startswith(
             "gpu:amdgpu"))
@@ -181,7 +183,62 @@ class TestHardwareParsers:
         monkeypatch.setattr(C, "Path", Boom)
         assert C.cpu_model() == "your processor"  # unreadable -> honest filler
 
-    def test_gpu_names_skips_subprocess_when_gpu_switched_off(self, monkeypatch):
+    def test_gpu_names_are_inventory_not_encoding(self, monkeypatch):
+        """Switched-off GPU ENCODING must not hide the device list: reading
+        names (nvidia-smi/lspci) encodes nothing, so the picker keeps real
+        names instead of degrading to vendor words."""
+        import shutil as sh
+        import subprocess as sp
         monkeypatch.setenv("TRANSMUTE_DISABLE_GPU", "1")
-        assert C.nvidia_gpu_names() == []
-        assert C.lspci_product("01:00.0") == ""
+        monkeypatch.setattr(sh, "which", lambda n: "/usr/bin/" + n)
+        seen = []
+
+        class P:
+            returncode = 0
+            stdout = ""
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd[0])
+            p = P()
+            p.stdout = ("NVIDIA GeForce RTX 9999\n" if cmd[0] == "nvidia-smi"
+                        else "00:02.0 VGA controller: NVIDIA Inc. GeForce RTX 9999\n")
+            return p
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        assert C.nvidia_gpu_names() == ["NVIDIA GeForce RTX 9999"]
+        assert "RTX 9999" in C.lspci_product("00:02.0")
+        assert seen == ["nvidia-smi", "lspci"]
+
+    def test_switched_off_says_switched_off_not_broken(self, hw, tmp_path,
+                                                       monkeypatch):
+        """GPU measurement off -> report has no GPU rows -> the entry's own
+        reason must be 'switched off', never 'not in this ffmpeg build'
+        (which told a healthy RTX 5090 it was broken - real user, 2026-11)."""
+        import dataclasses
+        from transmute.paths import AppPaths
+        rep = _rep()
+        no_gpu = dataclasses.replace(
+            rep, encoders=[e for e in rep.encoders if not e.hw])
+        monkeypatch.setenv("TRANSMUTE_DISABLE_GPU", "1")
+        c = ConverterController(report_provider=lambda *a, **k: no_gpu,
+                                queue=object(), paths=AppPaths(root=tmp_path))
+        gpus = [d for d in c.devices() if d["kind"] == "gpu"]
+        assert len(gpus) == 2
+        for d in gpus:
+            assert d["works"] is False and d["disabled"] is True
+            assert "switched off" in d["why"]
+        cpu = next(d for d in c.devices() if d["kind"] == "cpu")
+        assert cpu["disabled"] is False and cpu["works"] is True
+
+    def test_switched_off_outranks_stale_measurements(self, hw, tmp_path,
+                                                      monkeypatch):
+        """A GPU whose probe rows carry an old measured failure is STILL
+        merely switched off while measurement is disabled - yesterday's
+        verdict must not masquerade as today's state (cache said so)."""
+        from transmute.paths import AppPaths
+        monkeypatch.setenv("TRANSMUTE_DISABLE_GPU", "1")
+        c = ConverterController(report_provider=_rep, queue=object(),
+                                paths=AppPaths(root=tmp_path))
+        nv = next(d for d in c.devices() if "nvidia" in d["id"])
+        assert nv["disabled"] is True and "switched off" in nv["why"]
+        assert "-22" not in nv["why"]

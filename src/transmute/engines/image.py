@@ -39,6 +39,23 @@ def all_zero(path: Path) -> bool:
         return True
 
 
+def _pdf_ready(im, Image):
+    """One page of pixels any viewer will show, exactly as measured on this
+    Pillow build: RGBA written raw embeds as lossy JPEG-2000 and its alpha
+    lands on a SECOND page - so alpha is flattened onto white; palettes and
+    16-bit/float modes move to modes the PDF plugin writes for sure."""
+    if im.mode in ("I", "I;16", "F"):
+        return im.convert("L")
+    has_alpha = ("A" in im.mode or (im.mode == "P"
+                 and im.info.get("transparency") is not None))
+    if has_alpha or im.mode == "P":
+        rgba = im.convert("RGBA")
+        flat = Image.new("RGB", rgba.size, (255, 255, 255))
+        flat.paste(rgba, (0, 0), rgba)
+        return flat
+    return im.copy()  # RGB/L/1/CMYK: PDF plugin writes these directly (measured)
+
+
 def _supports(features, name: str) -> bool:
     # jpg/png/gif are core Pillow formats: features.check() does not know them
     # (and warns) on modern builds - check the plugin registry instead.
@@ -84,7 +101,24 @@ class ImageEngine:
                     "" if _supports(features, "avif") else "local Pillow build lacks AVIF")
         if ext == ".png":
             return (True, "")
+        if ext == ".pdf":
+            return self._can_write_pdf()
         return False, f"unsupported image target '{ext}'"
+
+    @staticmethod
+    def _can_write_pdf() -> tuple[bool, str]:
+        """PDF write is PROVEN by doing it in memory (ms), never assumed -
+        same discipline as _probe_pillow for every other format."""
+        import io
+        try:
+            Image, _ = _load_pillow()
+            buf = io.BytesIO()
+            Image.new("RGB", (2, 2)).save(buf, "PDF")
+            if buf.tell() > 0:
+                return True, ""
+            return False, "local Pillow build cannot write PDF"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"PDF write failed: {type(exc).__name__}: {exc}"
 
     # ------------------------------------------------------------ convert
     def convert(self, src: Path, dst: Path, *, quality: int = 80, method: int = 6,
@@ -136,7 +170,10 @@ class ImageEngine:
             dst.unlink(missing_ok=True)
             return EngineResult("failed", reason="encoder produced empty output",
                                 seconds=res.seconds)
-        if out_size >= src_size * (1.0 - min_savings_pct / 100.0):
+        # PDF is a CONTAINER change, not compression: it may honestly grow
+        # the file. The savings gate (and its "kept" outcome) guards only
+        # same-container re-encodes.
+        if ext_out != ".pdf" and out_size >= src_size * (1.0 - min_savings_pct / 100.0):
             dst.unlink(missing_ok=True)
             return EngineResult("kept", reason=f"only {100 * (1 - out_size / max(src_size, 1)):.1f}% "
                                                f"smaller (<{min_savings_pct:g}%): original kept",
@@ -172,6 +209,14 @@ class ImageEngine:
                 im.save(dst, "AVIF", quality=quality, **save_kw)
             elif ext_out == ".png":
                 im.save(dst, "PNG", optimize=True, **save_kw)
+            elif ext_out == ".pdf":
+                # one picture = one page (animated input: frame 0 - the
+                # picker says so in plain words, nothing is lost silently)
+                _pdf_ready(im, Image).save(dst, "PDF", quality=quality, **save_kw)
+                return EngineResult("converted", output=dst,
+                                    data={"frames": 1, "pages": 1,
+                                          "input_format": fmt_in,
+                                          "pixels": list(im.size)})
             else:
                 return EngineResult("failed", reason=f"unsupported target {ext_out}")
         return EngineResult("converted", output=dst,
@@ -265,6 +310,8 @@ class ImageEngine:
             Image, _f = _load_pillow()
         except Exception as exc:  # noqa: BLE001
             return EngineResult("failed", reason=f"Pillow not importable: {exc}")
+        if Path(out).suffix.lower() == ".pdf":
+            return self._verify_pdf(out)
         try:
             with Image.open(out) as o:
                 o.load()
@@ -287,3 +334,23 @@ class ImageEngine:
         return EngineResult("converted", output=out,
                             data={"verified": True, "format": out_fmt,
                                   "frames": out_frames})
+
+    @staticmethod
+    def _verify_pdf(out: Path) -> EngineResult:
+        """Pillow cannot open PDFs as pictures: verify like the PDF writer in
+        document.py does - %PDF magic + pikepdf must parse with >= 1 page."""
+        try:
+            import pikepdf
+            with open(out, "rb") as fh:
+                if fh.read(5) != b"%PDF-":
+                    return EngineResult("failed", reason="output is not a PDF")
+            with pikepdf.open(out) as pdf:
+                pages = len(pdf.pages)
+        except ImportError:
+            return EngineResult("failed", reason="pikepdf missing - cannot verify PDF output")
+        except Exception as exc:  # noqa: BLE001
+            return EngineResult("failed", reason=f"output unreadable: {type(exc).__name__}: {exc}")
+        if pages < 1:
+            return EngineResult("failed", reason="PDF has no pages")
+        return EngineResult("converted", output=out,
+                            data={"verified": True, "format": "PDF", "pages": pages})

@@ -351,6 +351,7 @@ class ConverterController:
         "alac": "ALAC", "vorbis": "Vorbis",
         "webp": "WebP", "webp(animated)": "WebP (animated)",
         "avif": "AVIF", "png": "PNG", "jpeg": "JPEG",
+        "pdf (page)": "PDF page",
         "pdf (lossless smaller)": "Smaller PDF",
         "png (per page)": "PNG image (one file per page)",
         "jpg (per page)": "JPEG image (one file per page)",
@@ -373,6 +374,7 @@ class ConverterController:
         "webp": "much smaller than JPEG",
         "webp(animated)": "keeps GIF motion and loop count",
         "avif": "newest and smallest, needs recent apps",
+        "pdf (page)": "print/share - one page per picture",
         "png": "lossless, exact pixels",
         "jpeg": "classic photo format",
         "pdf (lossless smaller)": "pixel-identical recompression",
@@ -447,6 +449,9 @@ class ConverterController:
         "png": "Pixel-perfect, no compression artifacts. Larger files.",
         "webp": "Much smaller than JPEG, opens in almost every current app.",
         "avif": "Newest and smallest photo format; needs recent apps.",
+        "pdf (page)": "Makes the picture a document page - for printing, email, "
+                      "and opening anywhere. Transparent areas become white, and "
+                      "an animated file becomes a single page of its first frame.",
     }
 
     @staticmethod

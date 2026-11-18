@@ -437,6 +437,7 @@ def _probe_pillow() -> dict[str, Any]:
             "jpg": can_save("JPEG"),
             "webp": can_save("WEBP", "RGBA"),
             "avif": can_save("AVIF", "RGBA"),
+            "pdf": can_save("PDF"),
         }
         # animated WebP: two DISTINCT frames in, multiple frames back out
         # (identical frames get deduplicated by libwebp - false negative trap)
@@ -699,6 +700,12 @@ def build_matrix(rep: CapabilityReport) -> list[MatrixRow]:
                           recommended=bool(feat.get("avif")),
                           note="shown only if the local Pillow build supports AVIF"))
     rows.append(MatrixRow("image", "png", "Pillow/PNG", available=bool(feat.get("png"))))
+    # Container change, not compression: availability is only "can THIS
+    # Pillow write a PDF" - proven by writing one in the probe (ms).
+    rows.append(MatrixRow("image", "pdf (page)", "Pillow/PDF",
+                          available=bool(feat.get("pdf")),
+                          note="one page per picture; transparency becomes white"
+                               if feat.get("pdf") else "local Pillow build cannot write PDF"))
 
     any_pdf = rep.pdf_backends.get("pikepdf") or rep.pdf_backends.get("qpdf") \
         or rep.pdf_backends.get("ghostscript")

@@ -1,6 +1,6 @@
 [project]
 name = "transmute"
-version = "0.1.0"
+version = "0.2.0"
 description = "Transmute - open-source media & document converter that adapts to the machine it runs on (runtime capability probing, verify-before-replace, resource governor)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,6 +34,15 @@ dev = [
 ]
 gui = [
     "PySide6>=6.6",
+]
+# Serve mode (Phase B): HTTP front door onto the SAME core as the GUI.
+# python-multipart is required by FastAPI to parse multipart/form-data
+# uploads - it is part of "fastapi with file upload", not a feature choice.
+serve = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
 ]
 
 [build-system]

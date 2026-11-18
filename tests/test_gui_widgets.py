@@ -286,6 +286,79 @@ class TestPickersMirrorTheReport:
         window.device_box.setCurrentIndex(window.device_box.findData("auto"))
         assert window._effective_encoder() == ""  # engine auto again
 
+    def test_switching_devices_drops_other_vendors_encoder_now(
+            self, qapp, monkeypatch):
+        """The user's screenshot (2026-11): Encoder held "GPU - NVIDIA av1"
+        while CPU/GPU switched from the RTX 5090 to the CPU - and it STAYED
+        held for the whole re-benchmark, so a job would have encoded on the
+        GPU they had just deselected ("i see a logic issue, nvidia and
+        being able to select cpu"). A pick must drop other vendors'
+        encoders from the effective plan the same instant, not after
+        measuring; the measurement then refines the ladder."""
+        from transmute.gui.app import MainWindow
+        from transmute.probe.capability import EncoderCapability
+        from test_gui_controller import _report
+        rep = _report()
+        rep.encoders = list(rep.encoders) + [
+            EncoderCapability(name="av1_nvenc", codec="av1",
+                              backend="nvidia-nvenc", hw=True,
+                              verified=True, fps=59.0),
+        ]
+        ctrl = ConverterController(report_provider=lambda: rep,
+                                   queue=_RecordingQueue())
+        ctrl._report = rep
+        # fixed inventory: one CPU, one NVIDIA GPU - the contradiction must
+        # not depend on what box the suite runs on
+        monkeypatch.setattr(ctrl, "devices", lambda: [
+            dict(id="cpu", kind="cpu", name="Test CPU", backends=["cpu"],
+                 works=True, why="", disabled=False, disabled_kind=""),
+            dict(id="gpu:nvidia:0x2b85", kind="gpu", name="Test GPU",
+                 backends=["nvidia-nvenc"], works=True, why="",
+                 disabled=False, disabled_kind=""),
+            dict(id="gpu:amdgpu:0x13c0", kind="gpu", name="Other GPU",
+                 backends=["va-api", "amd-amf"], works=True, why="",
+                 disabled=False, disabled_kind=""),
+        ])
+        monkeypatch.delenv("TRANSMUTE_DISABLE_GPU", raising=False)
+        win = MainWindow(controller=ctrl)
+        monkeypatch.setattr(win, "_start_reprobe", lambda: None)
+        try:
+            win.cat_box.setCurrentText("video")
+            win.device_box.setCurrentIndex(
+                win.device_box.findData("gpu:nvidia:0x2b85"))
+            win._load_encoders(0)
+            assert [win.enc_box.itemData(i)
+                    for i in range(win.enc_box.count())] == ["", "av1_nvenc"]
+            win.enc_box.setCurrentIndex(1)
+            assert win._effective_encoder() == "av1_nvenc"
+            # the pick that used to keep contradicting: CPU, this instant
+            win.device_box.setCurrentIndex(
+                win.device_box.findData("cpu"))
+            datas = [win.enc_box.itemData(i)
+                     for i in range(win.enc_box.count())]
+            assert "av1_nvenc" not in datas      # no re-benchmark needed
+            assert win._effective_encoder() == "libsvtav1"
+            assert "NVIDIA" not in win.lbl_note.text()
+            # belt AND braces: even a hand-stale selection cannot leak
+            win.enc_box.clear()
+            win.enc_box.addItem("stale", "av1_nvenc")
+            assert win._effective_encoder() == "libsvtav1"
+            # a device that WORKS but not for THIS target must offer a way
+            # out, not empty parentheses ("...for this here ().") - the
+            # Radeon + AV1 case on the user's box
+            win.device_box.setCurrentIndex(
+                win.device_box.findData("gpu:amdgpu:0x13c0"))
+            assert "()" not in win.lbl_note.text()
+            assert "works on this PC" in win.lbl_note.text()
+            # leave the persisted pick as Auto: set_device WRITES prefs, and
+            # a fake device id left behind would poison every later window
+            # in the session (device() != "auto" resolves auto_encoder)
+            win.device_box.setCurrentIndex(
+                win.device_box.findData("auto"))
+            assert ctrl.device() == "auto"
+        finally:
+            win.close()
+
 
 class TestFileList:
     def test_unsupported_type_disabled(self, window, tmp_path):

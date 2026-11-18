@@ -671,6 +671,15 @@ class MainWindow(QMainWindow):
             os.environ["TRANSMUTE_DISABLE_GPU"] = "1"
         else:
             os.environ.pop("TRANSMUTE_DISABLE_GPU", None)
+        # The SCREEN matches the pick the same instant, not a minute later.
+        # (user's screenshot, 2026-11: they pinned the RTX 5090, chose
+        # "GPU - NVIDIA av1", then picked CPU - yet the Encoder box kept
+        # holding av1_nvenc while the re-benchmark ran, so a job would have
+        # encoded on the very GPU they had just deselected.) Rebuild both
+        # lists from the NEW device's rows; the fresh measurement then
+        # refines them again when it lands.
+        self._load_encoders(0)
+        self._load_devices()
         # the numbers must belong to the chosen device: re-measure this
         # machine now (same contract the old GPU switch had)
         self._start_reprobe()
@@ -681,7 +690,7 @@ class MainWindow(QMainWindow):
         auto knows no devices, and estimates measure the same plan."""
         if self.enc_box.isEnabled():
             enc = self.enc_box.currentData()
-            if enc:
+            if enc and self._enc_on_device(str(enc)):
                 return str(enc)
         if self.ctrl.device() != "auto":
             cat = self.cat_box.currentText()
@@ -689,6 +698,20 @@ class MainWindow(QMainWindow):
             if target:
                 return self.ctrl.auto_encoder(cat, target) or ""
         return ""
+
+    def _enc_on_device(self, enc: str) -> bool:
+        """True when enc belongs to the device the user pinned (Auto covers
+        the whole ladder). Guards the one window a stale widget could still
+        offer another vendor's encoder: the pin's allowed ladder is checked
+        AGAIN at every use, so a deselected GPU can never run a job."""
+        backends = self.ctrl.device_backends()
+        if backends is None:
+            return True
+        cat = self.cat_box.currentText()
+        target = self._current_target()
+        if not target:
+            return True
+        return enc in self.ctrl.encoders(cat, target)
 
     # ------------------------------------------------ estimate (measured here)
     def _on_crf_choice(self, val: int, source: str) -> None:
@@ -1003,6 +1026,19 @@ class MainWindow(QMainWindow):
                     self.lbl_note.setText(f"{dev['name']} - {dev['why']}")
                     self.lbl_note.setToolTip(dev["why"])
                     return
+                if not dev["why"]:
+                    # device WORKS (other codecs verified) but none for this
+                    # Target: naming the device's own success as a "why"
+                    # would print empty parentheses (Radeon + AV1, 2026-11)
+                    self.lbl_note.setText(
+                        f"{dev['name']} works on this PC, but has no "
+                        "encoder for the Target you chose that passed the "
+                        "benchmark - pick another Target, or another device "
+                        "under CPU / GPU.")
+                    self.lbl_note.setToolTip(
+                        f"{dev['name']} verified encoders do not cover this "
+                        "Target. Re-benchmark this PC to measure again.")
+                    return
                 self.lbl_note.setText(
                     f"{dev['name']} has no verified encoder for this here"
                     f" ({dev['why']}).")
@@ -1015,9 +1051,12 @@ class MainWindow(QMainWindow):
             return
         enc = self.enc_box.currentData()
         if enc:
+            # never "the auto pick below": the CPU/GPU picker has its OWN
+            # "Auto" row underneath, and users read this line pointing AT IT
+            # (screenshot 2026-11). Name the widget the choice lives in.
             self.lbl_note.setText(
-                f"Using {self.ctrl.human_encoder(enc)} - overrides the auto "
-                "pick below.")
+                f"Using {self.ctrl.human_encoder(enc)} - chosen under "
+                "Encoder, so auto (fastest verified) is not used.")
             self.lbl_note.setToolTip(f"{raw}\nselected: {enc}".strip())
             return
         self.lbl_note.setText(

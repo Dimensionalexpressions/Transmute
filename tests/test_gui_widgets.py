@@ -237,26 +237,54 @@ class TestPickersMirrorTheReport:
             assert seen[1]["stop"] is not first_stop
             assert not seen[1]["stop"].is_set()
 
-    def test_gpu_switch_persists_and_remeasures(self, window, monkeypatch):
-        """User directive: the GPU switch lives in More… and off means the
-        report must stop claiming GPU support - so toggling re-measures."""
+    def test_device_pick_persists_and_remeasures(self, window, monkeypatch):
+        """User directive: the named CPU/GPU picker replaces the old GPU
+        switch; pinning the CPU means the report must stop claiming GPU
+        support - so any pick re-measures this machine."""
         calls = []
         # stub the TRIGGER (the real one spawns a measuring thread - no
         # racing a worker inside a unit test)
         monkeypatch.setattr(window, "_start_reprobe", lambda: calls.append(1))
         monkeypatch.delenv("TRANSMUTE_DISABLE_GPU", raising=False)
-        # drive from a known state: outer pytest env may have started the
-        # switch off already, and toggling to the SAME state fires no signal
-        window.chk_gpu.setChecked(True)
+        # drive from a known state: outer pytest env may have started with
+        # the CPU pin already active from an earlier test
+        window.device_box.setCurrentIndex(window.device_box.findData("auto"))
         calls.clear()
-        window.chk_gpu.setChecked(False)
-        assert window.ctrl.prefs().get("use_gpu") is False
+        window.device_box.setCurrentIndex(window.device_box.findData("cpu"))
+        assert window.ctrl.device() == "cpu"
         assert os.environ.get("TRANSMUTE_DISABLE_GPU") == "1"
         assert calls == [1]
-        window.chk_gpu.setChecked(True)
-        assert window.ctrl.prefs().get("use_gpu") is True
+        window.device_box.setCurrentIndex(window.device_box.findData("auto"))
+        assert window.ctrl.device() == "auto"
         assert "TRANSMUTE_DISABLE_GPU" not in os.environ
         assert calls == [1, 1]
+
+    def test_device_picker_lists_this_machine_not_placeholders(self, window):
+        """Zero hardware assumptions: every entry is a device read from
+        THIS machine (Auto + the CPU under its real model name)."""
+        datas = [window.device_box.itemData(i)
+                 for i in range(window.device_box.count())]
+        assert datas[0] == "auto"
+        assert "cpu" in datas
+        i = datas.index("cpu")
+        assert window.device_box.itemText(i).startswith("CPU - ")
+        # real model name, not "your processor" filler or an empty label
+        assert len(window.device_box.itemText(i)) > len("CPU - ") + 3
+
+    def test_device_pin_scopes_encoders_and_estimates(self, window,
+                                                      monkeypatch):
+        """Pinning the CPU must narrow the encoder list to CPU-verified
+        paths and resolve 'auto' TO a concrete encoder, so queue jobs and
+        estimates provably belong to the chosen device."""
+        monkeypatch.setattr(window, "_start_reprobe", lambda: None)
+        window.cat_box.setCurrentText("video")  # av1: ladder is all-cpu rows
+        window.device_box.setCurrentIndex(window.device_box.findData("cpu"))
+        assert [window.enc_box.itemData(i)
+                for i in range(window.enc_box.count())] == \
+            ["", "libsvtav1", "libaom-av1"]
+        assert window._effective_encoder() == "libsvtav1"  # auto -> pinned
+        window.device_box.setCurrentIndex(window.device_box.findData("auto"))
+        assert window._effective_encoder() == ""  # engine auto again
 
 
 class TestFileList:

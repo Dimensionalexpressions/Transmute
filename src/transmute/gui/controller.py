@@ -34,6 +34,121 @@ PDF_EXPORT = {"png (per page)": "png", "jpg (per page)": "jpg", "txt (text)": "t
 # the engine reads them as its format list, so import, don't duplicate.
 from ..engines.document import DOC_TARGETS as DOC_EXPORT  # noqa: E402
 
+# ------------------------------------------------------------- device names
+# The CPU/GPU selector (user request) must show the machine's REAL hardware,
+# read at runtime: /proc/cpuinfo, /sys/class/drm render nodes, and the NVIDIA
+# management tool where the driver ships one. Nothing is assumed from build
+# time; a GPU that cannot be used stays listed with its measured reason.
+
+_GPU_BACKENDS_OF_DRIVER = {
+    "nvidia": ("nvidia-nvenc",),
+    "amdgpu": ("va-api", "amd-amf"),
+    "i915": ("va-api", "intel-oneapi"),
+    "xe": ("va-api", "intel-oneapi"),
+}
+_GPU_NAME_FALLBACK = {
+    "nvidia": "NVIDIA graphics", "amdgpu": "AMD graphics",
+    "i915": "Intel graphics", "xe": "Intel graphics",
+}
+
+
+def _gpu_gpu_tools_enabled() -> bool:
+    # with GPU probing switched off (tests, VRAM-occupied boxes) the generic
+    # names are honest and we skip subprocesses entirely
+    import os
+    return os.environ.get("TRANSMUTE_DISABLE_GPU", "").lower() not in (
+        "1", "true", "yes")
+
+
+def cpu_model() -> str:
+    try:
+        for line in Path("/proc/cpuinfo").read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            if line.lower().startswith("model name"):
+                return line.split(":", 1)[1].strip() or "your processor"
+    except OSError:
+        pass
+    return "your processor"
+
+
+def gpu_render_nodes() -> list[dict[str, str]]:
+    """[{driver, vendor, device, slot}] straight from /sys - never cached."""
+    import glob
+    import os
+    out: list[dict[str, str]] = []
+    try:
+        paths = sorted(glob.glob("/sys/class/drm/renderD*/device"))
+    except OSError:
+        return out
+    for dev in paths:
+        try:
+            driver = os.path.basename(os.path.realpath(
+                os.path.join(dev, "driver")))
+            vendor = Path(os.path.join(dev, "vendor")).read_text().strip()
+            device = Path(os.path.join(dev, "device")).read_text().strip()
+        except OSError:
+            continue
+        slot = ""
+        try:
+            for line in Path(os.path.join(dev, "uevent")).read_text(
+                    encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("PCI_SLOT_NAME="):
+                    slot = line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        out.append({"driver": driver, "vendor": vendor,
+                    "device": device, "slot": slot})
+    return out
+
+
+def nvidia_gpu_names() -> list[str]:
+    """Exact per-GPU names when the NVIDIA driver's tool is present."""
+    import shutil
+    import subprocess
+    if not _gpu_gpu_tools_enabled() or not shutil.which("nvidia-smi"):
+        return []
+    try:
+        p = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=6)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if p.returncode != 0:
+        return []
+    return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+
+
+def _strip_lspci_product(line: str) -> str:
+    """'00:02.0 VGA compatible controller: Advanced Micro Devices, Inc.
+    [AMD/ATI] Granite Ridge [Radeon Graphics]' -> 'Granite Ridge [Radeon
+    Graphics]' (pure; no shell, no network)."""
+    if ": " not in line:
+        return ""
+    product = line.rsplit(": ", 1)[1].strip()
+    for junk in (" rev ", " (rev"):
+        if junk in product:
+            product = product.split(junk)[0].strip()
+    for cut in ("[AMD/ATI] ", "[Intel Technologies] ", "Inc. "):
+        if cut in product:
+            product = product.split(cut, 1)[1].strip()
+    return product
+
+
+def lspci_product(slot: str) -> str:
+    """Best-effort human product name for a PCI slot ("" when pciutils or
+    the entry is absent - the caller then uses a vendor word)."""
+    import shutil
+    import subprocess
+    if not slot or not _gpu_gpu_tools_enabled() or not shutil.which("lspci"):
+        return ""
+    try:
+        p = subprocess.run(["lspci", "-s", slot], capture_output=True,
+                           text=True, timeout=4)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return _strip_lspci_product(p.stdout.strip()) if p.returncode == 0 else ""
+
+
 
 @dataclass
 class TargetInfo:
@@ -364,6 +479,13 @@ class ConverterController:
         return w
 
     def _device_word(self, enc) -> str:
+        # the machine's own device name when this report enumerated one
+        try:
+            for d in self.devices():
+                if enc.backend in d["backends"]:
+                    return d["name"]
+        except Exception:  # noqa: BLE001 - words must never break the picker
+            pass
         if enc.backend == "nvidia-nvenc":
             return "NVIDIA graphics"
         if enc.backend == "va-api":
@@ -373,6 +495,95 @@ class ConverterController:
         if enc.backend == "amd-amf":
             return "AMD AMF graphics"
         return "CPU"
+
+    # ------------------------------------------------------------- devices
+    # "CPU / GPU" selector (user request): one entry per device THIS machine
+    # actually has, named from what it actually reports. A device that cannot
+    # encode stays VISIBLE with the probe's own measured reason (doctrine:
+    # no hardware assumptions - neither absence nor capability).
+    def devices(self) -> list[dict[str, Any]]:
+        """[{id, kind, name, backends, works, why}] - CPU first, then one
+        entry per GPU (identical cards share one entry). Rebuilt whenever a
+        new report arrives (re-probe after a device pick)."""
+        report = self.report
+        cached = getattr(self, "_devices_cache", None)
+        if cached is not None and cached[0] is report:
+            return cached[1]
+        rows = list(getattr(report, "encoders", []))
+
+        def status(backends: tuple[str, ...]) -> tuple[bool, str]:
+            mine = [e for e in rows if e.backend in backends]
+            if any(e.verified for e in mine):
+                return True, ""
+            for e in mine:
+                if e.reason or e.skipped:
+                    return False, (e.reason or e.skipped)
+            if mine:
+                return False, "never verified on this machine"
+            return False, "no encoder for it in this ffmpeg build"
+
+        ok, why = status(("cpu",))
+        devs: list[dict[str, Any]] = [{
+            "id": "cpu", "kind": "cpu", "name": cpu_model(),
+            "backends": ["cpu"], "works": ok, "why": why,
+        }]
+        gpu_nodes = gpu_render_nodes()
+        nv_names = nvidia_gpu_names()
+        groups: dict[tuple[str, str], int] = {}
+        for n in gpu_nodes:
+            key = (n["driver"], n["device"])
+            groups[key] = groups.get(key, 0) + 1
+        nv_groups = sum(1 for (drv, _dev) in groups if drv == "nvidia")
+        for (driver, devid), count in groups.items():
+            backends = list(_GPU_BACKENDS_OF_DRIVER.get(driver, ("va-api",)))
+            if driver == "nvidia" and nv_names:
+                name = nv_names[0]
+                if nv_groups > 1 and len(nv_names) > 1:
+                    name = f"{name} (+{len(nv_names) - 1} more)"
+            else:
+                name = (lspci_product(next(
+                    (n["slot"] for n in gpu_nodes
+                     if n["driver"] == driver and n["device"] == devid), ""))
+                    or _GPU_NAME_FALLBACK.get(driver, "your GPU"))
+                if count > 1:
+                    name = f"{name} ({count} identical GPUs)"
+            ok, why = status(tuple(backends))
+            devs.append({
+                "id": f"gpu:{driver}:{devid}", "kind": "gpu", "name": name,
+                "backends": backends, "works": ok, "why": why,
+            })
+        self._devices_cache = (report, devs)
+        return devs
+
+    def device(self) -> str:
+        return str(self.prefs().get("device") or "auto")
+
+    def set_device(self, dev_id: str) -> None:
+        self.set_pref("device", dev_id or "auto")
+        self._devices_cache = None
+
+    def device_backends(self) -> set[str] | None:
+        """Backends the chosen device covers; None = Auto (whole ladder).
+        A device id that no longer exists falls back to Auto - stale prefs
+        must never hide the machine's working paths."""
+        dev = self.device()
+        if dev in ("", "auto"):
+            return None
+        if dev == "cpu":
+            return {"cpu"}
+        for d in self.devices():
+            if d["id"] == dev:
+                return set(d["backends"])
+        return None
+
+    def device_choice(self) -> dict[str, Any] | None:
+        """The chosen device entry (None for Auto) - the GUI uses its name
+        and reason words."""
+        dev = self.device()
+        for d in self.devices():
+            if d["id"] == dev:
+                return d
+        return None
 
     def about_lines(self, category: str, target: str,
                     encoder: str = "") -> list[str]:
@@ -489,7 +700,8 @@ class ConverterController:
         return None
 
     def encoders(self, category: str, target: str) -> list[str]:
-        """Verified encoder ladder for a codec target (fastest first, F10).
+        """Verified encoder ladder for a codec target (fastest first, F10),
+        scoped to the CPU/GPU device the user picked (Auto = whole ladder).
 
         Empty for non-codec targets (image/pdf/document): the engine picks
         internally; the UI shows the chain label from TargetInfo.note.
@@ -497,9 +709,21 @@ class ConverterController:
         if category not in ("video", "audio"):
             return []
         try:
-            return [c.name for c in self.report.verified_encoders(target)]
+            got = self.report.verified_encoders(target)
         except Exception:
             return []
+        backends = self.device_backends()
+        if backends is not None:
+            got = [c for c in got if c.backend in backends]
+        return [c.name for c in got]
+
+    def auto_encoder(self, category: str, target: str) -> str | None:
+        """The encoder "auto" means HERE AND NOW: fastest verified on this
+        machine for this target, on the chosen device. The GUI passes it
+        explicitly whenever a device is pinned, so queue jobs and estimates
+        provably run - and were measured - on that device."""
+        got = self.encoders(category, target)
+        return got[0] if got else None
 
     def quality_range(self, category: str, target: str):
         """(low, high, default) of the quality knob for the encoder that

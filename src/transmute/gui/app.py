@@ -141,9 +141,14 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: ConverterController | None = None) -> None:
         super().__init__()
         self.ctrl = controller or ConverterController()
-        # persisted GPU pref must be in place BEFORE any probe runs,
-        # so the report never claims GPU support the user switched off
-        if self.ctrl.prefs().get("use_gpu", True) is False:
+        # the persisted device pick must be in force BEFORE any probe runs,
+        # so the report never claims GPU paths the user switched off. One
+        # migration step: the old "GPU off" switch was the user's intent to
+        # run CPU-only - honour it as a CPU pin, never lose it silently.
+        if (self.ctrl.prefs().get("device") is None
+                and self.ctrl.prefs().get("use_gpu", True) is False):
+            self.ctrl.set_device("cpu")
+        if self.ctrl.device() == "cpu":
             os.environ["TRANSMUTE_DISABLE_GPU"] = "1"
         self._worker: threading.Thread | None = None
         # watch-folders state (F24): the watcher thread only posts text lines
@@ -338,19 +343,20 @@ class MainWindow(QMainWindow):
         self.chk_tonemap = QCheckBox("Tone-map HDR to SDR")
         rv.addRow("", self.chk_tonemap)
 
-        # More… options (user directive): the graphics-card switch changes
-        # what the capability report may claim - off means CPU-only truth.
+        # More… options (user directive): which hardware does the work. One
+        # named entry per device THIS PC actually has; the pick re-measures,
+        # so every speed number and estimate that follows belongs to it.
         more = QGroupBox("More…")
         mform = QFormLayout(more)
-        self.chk_gpu = QCheckBox("Use graphics card if it is faster (recommended)")
-        self.chk_gpu.setChecked(os.environ.get(
-            "TRANSMUTE_DISABLE_GPU", "").lower() not in ("1", "true", "yes"))
-        self.chk_gpu.setToolTip(
-            "Off: this PC will not use or recommend graphics-card\n"
-            "conversion - results are re-measured without it.\n"
-            "Graphics encoding keeps your CPU free but files can be larger.")
-        self.chk_gpu.toggled.connect(self._on_gpu_toggle)
-        mform.addRow(self.chk_gpu)
+        self.device_box = QComboBox()
+        self.device_box.setToolTip(
+            "Choose which hardware encodes and decodes.\n"
+            "Auto: whatever this PC measured fastest for this file.\n"
+            "Devices listed here were read from this machine at startup; one\n"
+            "that cannot be used stays listed with its own measured reason.")
+        self._load_devices()
+        self.device_box.currentIndexChanged.connect(self._on_device_pick)
+        mform.addRow("CPU / GPU", self.device_box)
         rv.addRow(more)
         qlrow = QHBoxLayout()
         self.rad_crf = QRadioButton("Quality (CRF)")
@@ -623,23 +629,56 @@ class MainWindow(QMainWindow):
         self._update_enc_note()
         self._sync_options_enabled()
 
-    def _on_gpu_toggle(self, on: bool) -> None:
-        self.ctrl.set_pref("use_gpu", bool(on))
-        if on:
-            os.environ.pop("TRANSMUTE_DISABLE_GPU", None)
-        else:
+    def _load_devices(self) -> None:
+        """Fill the CPU/GPU picker from what THIS machine reports right now
+        (controller reads /proc and /sys live - nothing assumed at build
+        time). A device that cannot encode is still selectable: doctrine is
+        visible with its own reason, never hidden."""
+        self.device_box.blockSignals(True)
+        self.device_box.clear()
+        self.device_box.addItem("Auto - whichever is fastest here", "auto")
+        for d in self.ctrl.devices():
+            label = ("CPU - " if d["kind"] == "cpu" else "GPU - ") + d["name"]
+            tip = d["name"]
+            if not d["works"]:
+                label += "  (not working here)"
+                tip = f"{d['name']} - why: {d['why']}"
+            self.device_box.addItem(label, d["id"])
+            self.device_box.setItemData(self.device_box.count() - 1, tip,
+                                        Qt.ItemDataRole.ToolTipRole)
+        i = self.device_box.findData(self.ctrl.device())
+        self.device_box.setCurrentIndex(i if i >= 0 else 0)
+        self.device_box.blockSignals(False)
+
+    def _on_device_pick(self, _idx: int) -> None:
+        dev = self.device_box.currentData() or "auto"
+        self.ctrl.set_device(dev)
+        # the report must match the pick: a CPU pin drops GPU rows, Auto or
+        # a GPU pin measures them again
+        if dev == "cpu":
             os.environ["TRANSMUTE_DISABLE_GPU"] = "1"
-        # the report must match the switch: re-measure this machine now
+        else:
+            os.environ.pop("TRANSMUTE_DISABLE_GPU", None)
+        # the numbers must belong to the chosen device: re-measure this
+        # machine now (same contract the old GPU switch had)
         self._start_reprobe()
 
-    # ------------------------------------------------ estimate (measured here)
-    def _toggle_adv(self) -> None:
-        show = not getattr(self, "_adv_open", False)
-        self._adv_open = show
-        self.adv_frame.setVisible(show)
-        self.btn_adv.setText(
-            ("▾" if show else "▸") + " Advanced (fine-tune quality & audio)")
+    def _effective_encoder(self) -> str:
+        """What actually runs for this pick. A device pin means 'auto' must
+        resolve HERE (fastest verified ON THAT DEVICE) - the engine's own
+        auto knows no devices, and estimates measure the same plan."""
+        if self.enc_box.isEnabled():
+            enc = self.enc_box.currentData()
+            if enc:
+                return str(enc)
+        if self.ctrl.device() != "auto":
+            cat = self.cat_box.currentText()
+            target = self._current_target()
+            if target:
+                return self.ctrl.auto_encoder(cat, target) or ""
+        return ""
 
+    # ------------------------------------------------ estimate (measured here)
     def _on_crf_choice(self, val: int, source: str) -> None:
         """Every notch of the slider (or spin) re-labels immediately and
         schedules a fresh MEASURED size - parent-product behaviour, honest
@@ -757,7 +796,17 @@ class MainWindow(QMainWindow):
         self.lbl_size.setText("measuring…")
         self.lbl_est.setText("Measuring an estimate on this PC…")
         self.lbl_est.show()
-        encoder = self.enc_box.currentData() or ""
+        encoder = self._effective_encoder()
+        if (not encoder and self.ctrl.device() != "auto"
+                and cat in ("video", "audio")
+                and not (cat == "video" and self.chk_remux.isChecked())):
+            d = self.ctrl.device_choice() or {}
+            self.lbl_size.setText("this device can't do it here")
+            self.lbl_est.setText(
+                f"{d.get('name', 'That device')} has no verified encoder for"
+                f" this on this PC ({d.get('why', 'probe found none')}).")
+            self.lbl_est.show()
+            return
         crf = self.crf_box.value() if self.rad_crf.isChecked() else None
         size_mb = self.size_box.value() if self.rad_size.isChecked() else None
         audio_mode = ("replace" if self.chk_audio_replace.isChecked()
@@ -881,6 +930,7 @@ class MainWindow(QMainWindow):
         # Same target selected fires no currentIndexChanged - without this
         # the details box stays EMPTY after benchmarking (user-reported).
         self._load_encoders(0)
+        self._load_devices()  # names/reasons re-sync to the NEW report
 
     def _update_about(self) -> None:
         """Details block: what the chosen target means in plain words + the
@@ -931,6 +981,15 @@ class MainWindow(QMainWindow):
         raw = tinfo.note if tinfo is not None else ""
         ladder = self.ctrl.encoders(cat, target) if target else []
         if not ladder:
+            dev = (self.ctrl.device_choice() if target else None)
+            if dev is not None and cat in ("video", "audio"):
+                # device pinned: the empty ladder is the DEVICE's fact, say
+                # so with the probe's own words (doctrine: visible + reason)
+                self.lbl_note.setText(
+                    f"{dev['name']} has no verified encoder for this here"
+                    f" ({dev['why']}).")
+                self.lbl_note.setToolTip(dev["why"])
+                return
             # non-codec targets: engine picks internally; chain label is the
             # only honest statement, raw ids stay in the tooltip (F5)
             self.lbl_note.setText("Engine chain: " + raw if raw else "")
@@ -1158,12 +1217,22 @@ class MainWindow(QMainWindow):
         if not target:
             self.lbl_status.setText("No target selected (none available?).")
             return
-        enc = (self.enc_box.currentData() or None) if self.enc_box.isEnabled() else None
+        remux = cat == "video" and self.chk_remux.isChecked()
+        enc = (self._effective_encoder() or None) if not remux else None
+        if (not remux and not enc and self.ctrl.device() != "auto"
+                and cat in ("video", "audio")):
+            # device pinned, nothing verified ON IT for this target: refuse
+            # with the machine's own reason - never silently run on other
+            # hardware the user did not pick
+            d = self.ctrl.device_choice() or {}
+            self.lbl_status.setText(
+                f"{d.get('name', 'That device')} cannot do this on this PC"
+                f" ({d.get('why', 'no verified encoder for it')}).")
+            return
         # P3 controls map 1:1 onto controller kwargs; the controller (not the
         # widgets) decides what they mean, incl. CRF-vs-size exclusivity.
         kw: dict = dict(encoder=enc, quality=self.quality.value(),
                         deep_pdf=self.deep_pdf.isChecked())
-        remux = cat == "video" and self.chk_remux.isChecked()
         if remux:
             # remux is an operation, not a codec choice: nothing else rides
             # along (the controller mirrors this contract, F2)

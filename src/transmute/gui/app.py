@@ -315,6 +315,12 @@ class MainWindow(QMainWindow):
         self.crf_box.valueChanged.connect(
             lambda v: self._on_crf_choice(v, "spin"))
         self.lbl_crf_word = QLabel("")
+        # which way is which (user feedback: an unlabeled slider is a guess)
+        muted = "#8b949e" if _dark else "#6e7781"
+        self.lbl_crf_worse = QLabel("worse")
+        self.lbl_crf_better = QLabel("better")
+        for _lbl in (self.lbl_crf_worse, self.lbl_crf_better):
+            _lbl.setStyleSheet(f"color:{muted};")
         self.lbl_size = QLabel("")
         self.lbl_size.setMinimumWidth(90)
         if _dark:
@@ -322,7 +328,9 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_size.setStyleSheet("color:#0a5bc0;")
         qrow = QHBoxLayout()
+        qrow.addWidget(self.lbl_crf_worse)
         qrow.addWidget(self.qslider, stretch=1)
+        qrow.addWidget(self.lbl_crf_better)
         qrow.addWidget(self.crf_box)
         qrow.addWidget(self.lbl_crf_word)
         qrow.addWidget(self.lbl_size)
@@ -577,7 +585,18 @@ class MainWindow(QMainWindow):
         self.lbl_crf_word.setText(f"CRF {crf} · {word}")
 
     def _est_dirty(self) -> None:
-        QTimer.singleShot(600, self._est_run)  # coax: one sample per burst
+        # ONE coalescing timer, restarted per movement: a slider drag causes
+        # a burst of ticks but exactly one measuring pass when it settles.
+        # (Lockup post-mortem: per-tick singleShots each launched their own
+        # full-machine sample encode and none could be cancelled.)
+        t = getattr(self, "_est_timer", None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(600)
+            t.timeout.connect(self._est_run)
+            self._est_timer = t
+        t.start()  # restart == latest movement wins
 
     def _est_run(self) -> None:
         if not hasattr(self, "lbl_est"):
@@ -596,6 +615,14 @@ class MainWindow(QMainWindow):
             return
         self._est_gen = getattr(self, "_est_gen", 0) + 1
         g = self._est_gen
+        # supersede: a measurement only ever replaces the one before it, so
+        # kill the old sample encode BEFORE starting the new one - moving a
+        # selector must never stack work on the user's machine
+        old = getattr(self, "_est_stop", None)
+        if old is not None:
+            old.set()
+        stop = threading.Event()
+        self._est_stop = stop
         self.lbl_size.setText("measuring…")
         self.lbl_est.setText("Measuring an estimate on this PC…")
         self.lbl_est.show()
@@ -613,7 +640,8 @@ class MainWindow(QMainWindow):
                                      audio_bitrate=(
                                          self.audio_kbps.currentText()
                                          if self.chk_audio_replace.isChecked()
-                                         else None))).start()
+                                         else None),
+                                     stop=stop)).start()
 
     def _est_body(self, g, cat, target, src, **kw) -> None:
         # OFF the GUI thread: touch no widgets; signal only.

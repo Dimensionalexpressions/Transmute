@@ -167,3 +167,22 @@ def test_required_bytes_honest_estimate():
     assert preflight.required_bytes(2 * floor) == 2 * floor  # big src: its size
     n500 = preflight.required_bytes(1_000, {"size_mb": 500})
     assert n500 == int(500e6 * preflight.SIZE_TARGET_SLACK)  # budget dominates
+
+
+def test_run_command_cancel_event_kills_the_child(tmp_path):
+    """Supersede primitive (workstation-lockup fix): whoever sets the Event
+    stops the child process tree promptly - a superseded live estimate must
+    never keep grinding the user's CPU."""
+    import sys
+    from transmute.engines.base import run_command
+    ev = threading.Event()
+    timer = threading.Timer(0.3, ev.set)
+    timer.start()
+    t0 = time.monotonic()
+    res = run_command([sys.executable, "-c", "import time; time.sleep(30)",
+                       tmp_path], timeout_s=60, cancel=ev)
+    timer.join()
+    elapsed = time.monotonic() - t0
+    assert ev.is_set()
+    assert elapsed < 5.0, f"cancel ignored: waited {elapsed:.1f}s"
+    assert not res.ok

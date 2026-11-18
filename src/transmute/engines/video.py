@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -438,7 +439,8 @@ class VideoEngine:
                             size_mb: float | None = None,
                             preset: str | None = None,
                             audio_mode: str = "copy",
-                            audio_bitrate: str | None = None) -> dict:
+                            audio_bitrate: str | None = None,
+                            stop: "threading.Event | None" = None) -> dict:
         """Numbers for the GUI: how long and how big THIS file becomes,
         measured by encoding a real ~2-second piece of it with the SAME
         encoder, preset, quality and audio plan on THIS machine (user
@@ -446,9 +448,14 @@ class VideoEngine:
         behaviour, never from tables). Returns
         {"ok": bool, "est_s": float, "bytes": float, "size_is_target": bool,
          "sec": float, "note": str} - note carries the machine's own reason
-        when ok is False ("" = nothing to say)."""
+        when ok is False ("" = nothing to say). stop: set the Event and the
+        sample encode is killed and nothing is claimed - the GUI replaces
+        measurements as the user moves selectors, and superseded work must
+        stop burning the machine at once (workstation-lockup fix)."""
         none = {"ok": False, "est_s": 0.0, "bytes": 0.0,
                 "size_is_target": False, "sec": 0.0, "note": ""}
+        if stop is not None and stop.is_set():
+            return none
         dur = self.probe.duration_s(src)
         if not dur or dur <= 0:
             return none
@@ -498,7 +505,7 @@ class VideoEngine:
         cmd += ["-y", str(out)]
         try:
             t0 = time.monotonic()
-            res = run_command(cmd, timeout_s=120)
+            res = run_command(cmd, timeout_s=120, cancel=stop)
             wall = (res.seconds if res is not None and res.seconds
                     else time.monotonic() - t0)
             stderr = ((res.stderr_text or "") + (res.stdout or "")) if res else ""
@@ -509,6 +516,8 @@ class VideoEngine:
             out_bytes = out.stat().st_size if out.exists() else 0
         finally:
             shutil.rmtree(td, ignore_errors=True)
+        if stop is not None and stop.is_set():
+            return none  # superseded mid-sample: no number, no claim
         if not frames or not out_bytes:
             if res is not None and res.timed_out:
                 return {"ok": False, "est_s": 0.0, "bytes": 0.0,

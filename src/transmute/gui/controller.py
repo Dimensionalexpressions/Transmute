@@ -140,7 +140,8 @@ class ConverterController:
                             size_mb: float | None = None,
                             preset: str | None = None,
                             audio_mode: str = "copy",
-                            audio_bitrate: str | None = None) -> dict:
+                            audio_bitrate: str | None = None,
+                            stop=None) -> dict:
         """One-line time+size estimate for THIS file. Every number comes from
         encoding a real piece of the file with the chosen encoder on THIS
         machine (user directive: hardware-measured, never table-guessed).
@@ -172,12 +173,16 @@ class ConverterController:
             line = self._video_engine.estimate_conversion(
                 Path(src), target_codec=target, encoder=encoder or None,
                 crf=crf, size_mb=size_mb, preset=preset,
-                audio_mode=audio_mode, audio_bitrate=audio_bitrate)
+                audio_mode=audio_mode, audio_bitrate=audio_bitrate,
+                stop=stop)
         except Exception:
             line = none  # estimate is advisory - never break the GUI over it
         finally:
             if prev is not None:
                 set_paths(prev)
+        if stop is not None and stop.is_set():
+            # superseded mid-flight: return the wreckage but never cache it
+            return line
         if len(self._est_cache) > 64:
             self._est_cache.clear()
         self._est_cache[key] = line

@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,11 +91,18 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
                 log_path: Path | None = None, cwd: Path | None = None,
                 env: Mapping[str, str] | None = None,
                 governor: GovernorLike | None = None,
-                gpu: bool = False) -> CommandResult:
+                gpu: bool = False,
+                cancel: "threading.Event | None" = None) -> CommandResult:
     """Run one engine invocation. Never raises for engine misbehaviour.
 
     gpu=True while a governor is present takes a GPU concurrent-session slot.
+    cancel: set the Event and this invocation's process tree is killed
+    promptly - callers that can be superseded (live estimates!) must pass one
+    so superseded work stops burning the user's machine.
     """
+    if cancel is not None and cancel.is_set():
+        return CommandResult([str(a) for a in argv], -1, "", "cancelled",
+                             log_path, 0.0, timed_out=False)
     argv_s = [str(a) for a in argv]
     # P6: on Windows, path arguments over MAX_PATH are rewritten to the
     # \\?\ / \\?\UNC\ extended form (pure string logic; identical no-op on
@@ -131,6 +139,15 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
     if reg:
         child_token = reg(proc.pid)  # start_new_session=True -> pgid == pid
 
+    if cancel is not None:
+        # supersede-killer: the moment the caller's event flips, this
+        # child's whole tree dies (a replaced estimate must never keep
+        # the workstation busy)
+        def _kill_when_cancelled():
+            if cancel.wait(timeout_s):
+                _terminate_tree(proc)
+        threading.Thread(target=_kill_when_cancelled, daemon=True,
+                         name="transmute-cancel").start()
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:

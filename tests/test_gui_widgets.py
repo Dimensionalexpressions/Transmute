@@ -197,6 +197,41 @@ class TestPickersMirrorTheReport:
         assert seen[-1]["preset"] == "medium"
         assert seen[-1]["audio_mode"] == "copy"
 
+    def test_slider_row_shows_which_way_is_better(self, window):
+        """User feedback: an unlabeled quality slider is a guess - the ends
+        must say worse / better."""
+        assert window.lbl_crf_worse.text() == "worse"
+        assert window.lbl_crf_better.text() == "better"
+
+    def test_new_measurement_supersedes_the_previous(self, window,
+                                                     monkeypatch, tmp_path):
+        """Workstation must not lock up: every new measurement cancels the
+        one before it (stop Event fires), so superseded samples stop burning
+        CPU instead of stacking."""
+        seen = []
+
+        def fake(cat, target, src, **kw):
+            seen.append(kw)
+            return {"ok": True, "est_s": 1.0, "bytes": 1e6,
+                    "size_is_target": False, "sec": 1.0, "note": ""}
+
+        monkeypatch.setattr(window, "_current_target", lambda: "h264")
+        monkeypatch.setattr(window, "_target_info", lambda c, t: None)
+        monkeypatch.setattr(window.ctrl, "conversion_estimate", fake)
+        window.cat_box.setCurrentText("video")
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x")
+        window._add_one(clip)
+        window._est_run()
+        window._est_run()  # second movement replaces the first measurement
+        assert len(seen) >= 1
+        first_stop = seen[0].get("stop")
+        assert first_stop is not None, "estimate must receive a stop Event"
+        assert first_stop.is_set(), "superseded measurement was never cancelled"
+        if len(seen) > 1:
+            assert seen[1]["stop"] is not first_stop
+            assert not seen[1]["stop"].is_set()
+
     def test_gpu_switch_persists_and_remeasures(self, window, monkeypatch):
         """User directive: the GPU switch lives in More… and off means the
         report must stop claiming GPU support - so toggling re-measures."""

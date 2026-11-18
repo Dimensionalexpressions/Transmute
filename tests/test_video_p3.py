@@ -176,6 +176,22 @@ def test_estimate_returns_measured_numbers(tmp_path, fixtures):
     assert t["size_is_target"] is True
 
 
+def test_estimate_stop_event_claims_nothing_and_dies_fast(tmp_path, fixtures):
+    """Workstation-lockup fix contract: the GUI supersedes measurements as
+    selectors move; a stopped/replaced estimate must return promptly and
+    claim NOTHING (ok False, empty note) - never a stale half-measure."""
+    import threading
+    import time as _t
+    eng = _eng()
+    ev = threading.Event()
+    ev.set()
+    t0 = _t.monotonic()
+    d = eng.estimate_conversion(fixtures["mp4"], target_codec="h264",
+                                encoder="libx264", crf=23, stop=ev)
+    assert _t.monotonic() - t0 < 2.0
+    assert d["ok"] is False and d["note"] == ""
+
+
 def test_preset_and_audio_bitrate_end_up_in_the_file(tmp_path, fixtures):
     """Advanced fine-tuning must change the OUTPUT, not just the widgets:
     a chosen audio bitrate lands in the file bytes even when the container

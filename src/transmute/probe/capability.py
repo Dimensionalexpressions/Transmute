@@ -292,6 +292,11 @@ def _render_nodes() -> list:
         return []
 
 
+# Public: the engine mirrors the probe's node walk at run time (2026-11) -
+# whatever node the probe verified, the engine must find the same way.
+render_nodes = _render_nodes
+
+
 def _trial_cmds(ffmpeg: Path, cap: EncoderCapability) -> list[list[Any]]:
     """Candidate trial commands for one encoder; first success verifies it.
 

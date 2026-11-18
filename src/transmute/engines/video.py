@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ..probe.capability import (CapabilityProber, EncoderCapability,
-                             TONEMAP_VFILTER, gpu_force_disabled)
+                             TONEMAP_VFILTER, gpu_force_disabled, render_nodes)
 from ..probe.engines import EngineManager
 from .base import Availability, EngineResult, run_command
 from .media import (Probe, extract_video_bitstream_sha256, is_hdr_transfer,
@@ -73,6 +73,18 @@ ENCODER_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast",
 WORD_PRESET_ENCODERS = ("libx264", "libx265")
 # Encoders with documented reliable 2-pass rate control (measured, not vendor claim).
 TWO_PASS_ENCODERS = {"libx264", "libx265", "x264", "x265"}
+
+# Backends whose frames must be UPLOADED to a render node before encoding.
+# NVENC/AMF deliberately absent: they upload internally - the probe's trial
+# measured that forcing hwupload into them is rejected, so they run plain.
+_HW_UPLOAD_APIS = {"va-api": ("vaapi", "va"), "intel-oneapi": ("qsv", "qs")}
+
+
+def _hw_upload_needed(cap: EncoderCapability | None) -> tuple[str, str] | None:
+    """(device-type, alias) when this encoder needs GPU frames uploaded."""
+    if cap is None or not cap.hw:
+        return None
+    return _HW_UPLOAD_APIS.get(cap.backend)
 
 DEFAULT_CRF = {"av1": 30, "vp9": 33, "h264": 23, "hevc": 28}
 
@@ -202,6 +214,48 @@ class VideoEngine:
         return quality_bounds(cap.name if cap else None)
 
     # ------------------------------------------------------------- convert
+    # ---------------------------------------------------- GPU frame upload
+    def _hw_upload_plan(self, ffmpeg: Path, cap: EncoderCapability | None,
+                        cancel: "threading.Event | None" = None
+                        ) -> tuple[list[str], str, str]:
+        """(pre-input flags, vf tail, reason): how this encoder gets GPU
+        frames on THIS machine, decided by a 4-frame executed trial.
+
+        The probe verified upload encoders (VAAPI/QSV) by trying EVERY render
+        node - multi-GPU boxes must never assume node [0]: renderD128 may be
+        an NVIDIA card where VAAPI lacks the entrypoint while renderD129, the
+        iGPU, encodes fine (both caught on real machines). A conversion must
+        therefore NAME a working node the same way. If no node runs it NOW
+        (driver updated, GPU powered off since the benchmark) the job fails
+        instantly with that truth instead of burning the whole encode on a
+        doomed command (the gap this closed: probe verified, engine couldn't
+        run). Stateless on purpose: nodes are re-checked every job, GPU
+        state is allowed to change between jobs.
+        """
+        api = _hw_upload_needed(cap)
+        if api is None:
+            return [], "", ""
+        kind, alias = api
+        assert cap is not None
+        for node in (render_nodes() or [Path("/dev/dri/card0")]):
+            trial = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+                     "-init_hw_device", f"{kind}={alias}:{node}",
+                     "-filter_hw_device", alias,
+                     "-f", "lavfi", "-i",
+                     "testsrc2=size=320x192:rate=25:duration=0.2",
+                     "-frames:v", "4", "-vf", "format=nv12,hwupload",
+                     "-c:v", cap.name, "-f", "null", "-"]
+            r = run_command(trial, timeout_s=20, gpu=True, cancel=cancel)
+            if cancel is not None and cancel.is_set():
+                return [], "", "cancelled"
+            if r.ok:
+                return (["-init_hw_device", f"{kind}={alias}:{node}",
+                         "-filter_hw_device", alias], "format=nv12,hwupload",
+                        "")
+        return [], "", (f"no render node on this machine can run {cap.name} "
+                        "any more - the GPU or its driver changed since the "
+                        'benchmark; run "Re-benchmark this PC"')
+
     def convert(self, src: Path, dst: Path, *, container: str | None = None,
                 codec: str | None = None, crf: int | None = None,
                 encoder: str | None = None, prefer_hw: bool | None = None,
@@ -296,6 +350,14 @@ class VideoEngine:
                        if want_10 else f"no verified encoder for {target_codec} on this machine")
                 return EngineResult("failed", reason=why)
 
+        # Upload encoders (VAAPI/QSV): name a node that runs it NOW, or fail
+        # here with the machine's reason - never start a doomed encode.
+        hw_pre, hw_vf, hw_why = self._hw_upload_plan(ffmpeg, cap)
+        if hw_why:
+            return EngineResult("failed", reason=hw_why,
+                                encoder=cap.name if cap else "copy",
+                                log_path=log_path)
+
         # ------------------------------------------------ audio policy (copy/replace)
         # acodecs/ok_audio/bad_audio were computed above (they gate the F20 skip).
         audio_cmd: list[str] = ["-c:a", "copy"]
@@ -333,6 +395,7 @@ class VideoEngine:
 
         # ------------------------------------------------ quality: CRF or size target
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+                          *hw_pre,
                           "-i", src,
                           "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
                           "-c:v", cap.name if cap else "copy",
@@ -341,8 +404,13 @@ class VideoEngine:
                           "-f", fmt]
         if fmt in FASTSTART:
             cmd += ["-movflags", "+faststart"]
+        vf = ""
         if tone:
-            cmd += ["-vf", TONEMAP_VFILTER]
+            vf = TONEMAP_VFILTER
+        if hw_vf:  # upload last: every filter so far produced CPU frames
+            vf = f"{vf},{hw_vf}" if vf else hw_vf
+        if vf:
+            cmd += ["-vf", vf]
 
         pre_flags: list[str] = []
         if preset:
@@ -532,6 +600,14 @@ class VideoEngine:
         ffmpeg = self.engines.path("ffmpeg")
         if ffmpeg is None:
             return none
+        # the sample must run the SAME command shape the real job will: an
+        # upload encoder's node check happens here too, so a VAAPI estimate
+        # measures a GPU encode, never fails at convert() time afterwards
+        hw_pre, hw_vf, hw_why = self._hw_upload_plan(ffmpeg, cap, cancel=stop)
+        if hw_why == "cancelled" or (stop is not None and stop.is_set()):
+            return none
+        if hw_why:
+            return {**none, "note": hw_why}
         astreams = [st for st in self.probe.audio_streams(src)
                     if (st.get("codec_name") or "").lower()]
         if audio_mode == "replace" and astreams:
@@ -550,9 +626,12 @@ class VideoEngine:
         out = Path(td) / "s.mkv"
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel",
                           "error", "-stats",
+                          *hw_pre,
                           "-ss", f"{start:.2f}", "-i", src,
                           "-t", f"{sec:.2f}", "-map", "0:v:0", "-an",
                           "-c:v", cap.name, "-f", "matroska"]
+        if hw_vf:
+            cmd += ["-vf", hw_vf]
         if crf is not None:
             # same refusal as convert(): never measure a degenerate setting
             lo_, hi_, _d = quality_bounds(cap.name)

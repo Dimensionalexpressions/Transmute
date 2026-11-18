@@ -501,6 +501,23 @@ class ConverterController:
         except Exception:
             return []
 
+    def quality_range(self, category: str, target: str):
+        """(low, high, default) of the quality knob for the encoder that
+        will actually run - the slider scale (low = best). Encoders do NOT
+        share x264's 0..51: SVT-AV1 collapses below 2 (measured), librav1e
+        speaks -qp 0..255. None for non-video targets (engine has no
+        quality knob there)."""
+        if category != "video" or not target:
+            return None
+        if self._video_engine is None:
+            from ..engines.video import VideoEngine
+            self._video_engine = VideoEngine()
+        try:
+            enc = (self.encoders(category, target) or [None])[0]
+            return self._video_engine.quality_range(target, encoder=enc)
+        except Exception:
+            return (0, 51, 23)
+
     # -------------------------------------------------------------- jobs
     def suffix_for(self, category: str, target: str) -> str:
         base = target.split("(")[0].strip()

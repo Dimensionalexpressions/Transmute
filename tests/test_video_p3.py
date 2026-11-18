@@ -276,3 +276,69 @@ def test_size_target_two_pass_lands_near_target(tmp_path):
     actual_mb = actual / 1e6
     assert 0.75 * 0.5 <= actual_mb <= 0.75 * 1.30, actual_mb
     assert eng.verify(src, dst).ok
+
+
+# ------------------------------------- per-encoder quality scale (live bug)
+def test_quality_bounds_are_encoder_specific():
+    from transmute.engines.video import quality_bounds
+    assert quality_bounds("libx264") == (0, 51, 23)
+    # SVT-AV1 MEASURED to collapse at crf 0 (sample came out SMALLER than
+    # crf 10) and to invert crf 1->2: its honest floor is 2, not x264's 0.
+    assert quality_bounds("libsvtav1") == (2, 63, 30)
+    assert quality_bounds("libvpx-vp9") == (0, 63, 33)
+    # librav1e has no -crf at all (ffmpeg discards it silently); its knob
+    # is -qp, whose scale runs to 255 - never share the x264 numbers.
+    assert quality_bounds("librav1e")[1] == 255
+    assert quality_bounds(None) == (0, 51, 23)
+    assert quality_bounds("av1_nvenc") == (0, 51, 23)
+
+
+def test_quality_flags_use_the_knob_the_encoder_understands():
+    from dataclasses import dataclass
+
+    from transmute.engines.video import quality_flags
+
+    @dataclass
+    class Cap:
+        name: str
+        backend: str
+
+    assert quality_flags(Cap("libx264", "cpu"), 23) == ["-crf", "23"]
+    assert quality_flags(Cap("librav1e", "cpu"), 100) == ["-qp", "100"]
+    assert quality_flags(Cap("h264_nvenc", "gpu"), 23) == \
+        ["-cq", "23", "-b:v", "0", "-preset", "slow"]
+    assert quality_flags(Cap("av1_vaapi", "gpu"), 23) == []
+
+
+def test_slider_scale_follows_the_auto_encoder():
+    eng = _eng()
+    assert eng.quality_range("h264") == (0, 51, 23)
+    names = [c.name for c in eng.prober.report().verified_encoders("av1")]
+    if not names:
+        pytest.skip("no verified AV1 encoder on this box")
+    # the AV1 slider must NOT be on the legacy 0..51 scale
+    assert eng.quality_range("av1") in {(2, 63, 30), (4, 63, 32),
+                                        (0, 63, 33), (20, 255, 100)}
+    # named encoder: its own table entry, verified or not
+    assert eng.quality_range("av1", encoder="librav1e") == (20, 255, 100)
+
+
+def test_off_scale_quality_is_refused_not_measured(tmp_path, fixtures):
+    eng = _eng()
+    names = [c.name for c in eng.prober.report().verified_encoders("av1")]
+    if "libsvtav1" not in names:
+        pytest.skip("no verified SVT-AV1 on this box")
+    # crf 0 reads as "best" on x264's scale but is the SVT cliff: the file
+    # genuinely comes out SMALLER than crf 10 (measured) - refuse it.
+    dst = tmp_path / "x.mkv"
+    res = eng.convert(fixtures["mp4"], dst, codec="av1",
+                      encoder="libsvtav1", crf=0)
+    assert res.outcome == "failed" and "range" in res.reason
+    assert not dst.exists()
+    d = eng.estimate_conversion(fixtures["mp4"], target_codec="av1",
+                                encoder="libsvtav1", crf=0)
+    assert d["ok"] is False and "range" in d["note"]
+    # in-range the same encoder measures normally (the floor itself works)
+    d2 = eng.estimate_conversion(fixtures["mp4"], target_codec="av1",
+                                 encoder="libsvtav1", crf=2)
+    assert d2["ok"] is True

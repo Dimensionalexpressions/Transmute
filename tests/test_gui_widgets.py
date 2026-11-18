@@ -174,6 +174,11 @@ class TestPickersMirrorTheReport:
         monkeypatch.setattr(window, "_current_target", lambda: "h264")
         monkeypatch.setattr(window, "_target_info", lambda c, t: None)
         monkeypatch.setattr(window.ctrl, "conversion_estimate", fake)
+        # this test speaks the x264 scale (its numbers 23/34 are CRF values):
+        # pin it, like the real app does when the encoder actually is x264
+        monkeypatch.setattr(window.ctrl, "quality_range",
+                            lambda c, t: (0, 51, 23))
+        window._sync_options_enabled()
         window.cat_box.setCurrentText("video")
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"x")
@@ -400,7 +405,10 @@ class TestP3VideoControls:
         window._add_one(fixtures["mp4"])
         window._run()
         _, _, _, opts = window.ctrl._queue.added[0]
-        assert opts.get("crf") == 23 and "size_mb" not in opts
+        # the selector's CURRENT value rides along - whatever scale the
+        # current encoder carries (per-encoder quality ranges)
+        assert opts.get("crf") == window.crf_box.value() \
+            and "size_mb" not in opts
 
     def test_files_of_other_category_are_not_enqueued(self, window, fixtures):
         window.cat_box.setCurrentText("image")
@@ -535,3 +543,57 @@ class TestAdaptivePanel:
     def test_document_shows_format_menu_only(self, window):
         self._pick(window, "document", "docx")
         self._hidden(window, "chk_remux", "quality", "deep_pdf")
+
+
+class TestQualityScaleFollowsEncoder:
+    """Live bug: the slider always offered x264's 0..51. On AV1/SVT-AV1
+    crf 0 is a measured COLLAPSE (smaller file than crf 10), so dragging to
+    "better" shrank the estimate 900 MB -> 300 MB - backwards. The scale
+    now follows the encoder that will actually run."""
+
+    def test_slider_reranges_when_the_encoder_scale_changes(
+            self, window, monkeypatch):
+        monkeypatch.setattr(window.ctrl, "conversion_estimate",
+                            lambda *a, **k: {"ok": False})
+        monkeypatch.setattr(
+            window.ctrl, "quality_range",
+            lambda c, t: (0, 51, 23) if t == "h264" else (2, 63, 30))
+        window.cat_box.setCurrentText("video")
+        monkeypatch.setattr(window, "_current_target", lambda: "av1")
+        window._sync_options_enabled()
+        assert (window.crf_box.minimum(), window.crf_box.maximum()) == (2, 63)
+        assert (window.qslider.minimum(), window.qslider.maximum()) == (2, 63)
+        # the old number belonged to a DIFFERENT scale: never re-mapped
+        # silently - restart at what this encoder itself measured
+        assert window.crf_box.value() == 30 == window.qslider.value()
+        assert "CRF 30" in window.lbl_crf_word.text()
+        monkeypatch.setattr(window, "_current_target", lambda: "h264")
+        window._sync_options_enabled()
+        assert (window.crf_box.minimum(), window.crf_box.maximum()) == (0, 51)
+        assert window.crf_box.value() == 23 == window.qslider.value()
+
+    def test_crf_word_judges_position_not_absolute_number(
+            self, window, monkeypatch):
+        monkeypatch.setattr(window.ctrl, "conversion_estimate",
+                            lambda *a, **k: {"ok": False})
+        monkeypatch.setattr(window, "_current_target", lambda: "av1")
+        monkeypatch.setattr(window.ctrl, "quality_range",
+                            lambda c, t: (2, 63, 30))
+        window._sync_quality_scale()
+        window.crf_box.setValue(2)    # this encoder's floor = best
+        assert "near-lossless" in window.lbl_crf_word.text()
+        window.crf_box.setValue(30)   # its measured default = balanced
+        assert "balanced" in window.lbl_crf_word.text()
+        window.crf_box.setValue(55)
+        assert "small file" in window.lbl_crf_word.text()
+
+    def test_rav1e_scale_says_qp_not_crf(self, window, monkeypatch):
+        # librav1e has no -crf; showing "CRF 100" on a -qp knob is a lie
+        monkeypatch.setattr(window.ctrl, "conversion_estimate",
+                            lambda *a, **k: {"ok": False})
+        monkeypatch.setattr(window, "_current_target", lambda: "av1")
+        monkeypatch.setattr(window.ctrl, "quality_range",
+                            lambda c, t: (20, 255, 100))
+        window._sync_quality_scale()
+        assert (window.crf_box.minimum(), window.crf_box.maximum()) == (20, 255)
+        assert window.lbl_crf_word.text().startswith("QP 100")

@@ -75,6 +75,48 @@ WORD_PRESET_ENCODERS = ("libx264", "libx265")
 TWO_PASS_ENCODERS = {"libx264", "libx265", "x264", "x265"}
 
 DEFAULT_CRF = {"av1": 30, "vp9": 33, "h264": 23, "hevc": 28}
+
+# Usable quality range per encoder - (low, high, default), low = best.
+# Each encoder carries its own knob and scale; feeding x264's 0..51 to the
+# others is what produced the live bug where "better" quality measured a
+# SMALLER file. Measured on this machine's ffmpeg against a real meeting
+# recording (screen-share content), sweep per CRF:
+#   libsvtav1: crf 0 collapses (360 MB - SMALLER than crf 10's 698 MB),
+#              crf 1..2 invert; strictly monotonic 2..63 (1025→212 MB).
+#   libvpx-vp9: monotonic from 0 (809→211 MB).
+#   librav1e: has NO -crf at all - FFmpeg discards it with a warning and
+#              encodes at rav1e's own default; its knob is -qp 0..255.
+#   libaom-av1: never wins the speed ladder; documented safe floor 4.
+#   hardware: NVENC -cq 0..51; others pass no quality flag yet.
+QUALITY_BOUNDS: dict[str, tuple[int, int, int]] = {
+    "libx264": (0, 51, 23),
+    "libx265": (0, 51, 28),
+    "libsvtav1": (2, 63, 30),
+    "libaom-av1": (4, 63, 32),
+    "libvpx-vp9": (0, 63, 33),
+    "librav1e": (20, 255, 100),   # -qp scale, not CRF
+}
+
+
+def quality_bounds(encoder: str | None) -> tuple[int, int, int]:
+    """(low, high, default) of the quality knob for one encoder name.
+    Unknown/hardware encoders get the conservative x264-style scale."""
+    if encoder and encoder in QUALITY_BOUNDS:
+        return QUALITY_BOUNDS[encoder]
+    return (0, 51, 23)
+
+
+def quality_flags(cap, crf_val: int) -> list[str]:
+    """The quality knob in the form THIS encoder actually understands -
+    anything else is a silent lie (librav1e discards -crf) or a hard ffmpeg
+    failure. Estimates must build flags the SAME way real conversions do."""
+    if cap.name == "librav1e":
+        return ["-qp", str(crf_val)]
+    if cap.backend == "cpu":
+        return ["-crf", str(crf_val)]
+    if cap.name.endswith("_nvenc"):
+        return ["-cq", str(crf_val), "-b:v", "0", "-preset", "slow"]
+    return []
 DEFAULT_TARGET = {"mp4": "h264", "mov": "h264", "m4v": "h264",
                   "mkv": "av1", "webm": "vp9", "ts": "h264"}
 CODEC_DEFAULT_CONTAINER = {"av1": "mkv", "vp9": "webm", "h264": "mp4", "hevc": "mp4"}
@@ -145,6 +187,19 @@ class VideoEngine:
         preferred = [c for c in cands if not c.rgb_output]
         cands = preferred or cands
         return cands[0] if cands else None
+
+    def quality_range(self, target_codec: str,
+                      encoder: str | None = None) -> tuple[int, int, int]:
+        """(low, high, default) of the quality knob for the encoder that
+        WILL RUN on this target - the slider scale, low = best quality.
+        Rationale per encoder: QUALITY_BOUNDS."""
+        if encoder:
+            cap = next((c for c in self.prober.report().verified_encoders(
+                target_codec) if c.name == encoder), None)
+            return quality_bounds(cap.name if cap else encoder)
+        cap = self.pick_encoder(target_codec, want_10bit=False,
+                                prefer_hw=None)
+        return quality_bounds(cap.name if cap else None)
 
     # ------------------------------------------------------------- convert
     def convert(self, src: Path, dst: Path, *, container: str | None = None,
@@ -326,12 +381,19 @@ class VideoEngine:
             size_note = {"size_mb": size_mb, "video_bitrate_bps": v_bps,
                          "mode": "two-pass" if two_pass else "approximate-single-pass"}
         else:
+            if crf is not None and cap is not None:
+                lo_, hi_, _d = quality_bounds(cap.name)
+                if not lo_ <= int(crf) <= hi_:
+                    return EngineResult(
+                        "failed",
+                        reason=f"quality {crf} is outside {cap.name}'s usable "
+                               f"range {lo_}-{hi_} (measured on this box): "
+                               f"pick a value inside it - below the floor "
+                               f"that encoder stops behaving")
             crf_val = None if cap is None else \
                 (crf if crf is not None else DEFAULT_CRF.get(target_codec))
-            if crf_val is not None and cap.backend == "cpu":
-                cmd += ["-crf", str(crf_val)]
-            elif crf_val is not None and cap.name.endswith("_nvenc"):
-                cmd += ["-cq", str(crf_val), "-b:v", "0", "-preset", "slow"]
+            if crf_val is not None:
+                cmd += quality_flags(cap, crf_val)
         cmd += ["-y", dst]
 
         # ------------------------------------------------ run
@@ -491,14 +553,19 @@ class VideoEngine:
                           "-ss", f"{start:.2f}", "-i", src,
                           "-t", f"{sec:.2f}", "-map", "0:v:0", "-an",
                           "-c:v", cap.name, "-f", "matroska"]
+        if crf is not None:
+            # same refusal as convert(): never measure a degenerate setting
+            lo_, hi_, _d = quality_bounds(cap.name)
+            if not lo_ <= int(crf) <= hi_:
+                return {**none, "note":
+                        f"quality {crf} is outside {cap.name}'s usable range "
+                        f"{lo_}-{hi_} - nothing measured"}
         crf_val = crf if crf is not None else DEFAULT_CRF.get(target_codec)
-        if crf_val is not None and cap.backend == "cpu":
-            cmd += ["-crf", str(crf_val)]
+        if crf_val is not None:
+            cmd += quality_flags(cap, crf_val)
             if preset and cap.name in WORD_PRESET_ENCODERS \
                     and preset in ENCODER_PRESETS:
                 cmd += ["-preset", preset]
-        elif crf_val is not None and cap.name.endswith("_nvenc"):
-            cmd += ["-cq", str(crf_val), "-b:v", "0", "-preset", "slow"]
         if size_mb is not None:  # rate-control mode: sample at the job bitrate
             v_bps = max(int(size_mb * 8e6 / dur) - audio_bps, 100_000)
             cmd += ["-b:v", str(v_bps)]

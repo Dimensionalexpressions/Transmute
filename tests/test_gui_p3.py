@@ -117,3 +117,23 @@ def test_first_frame_returns_png_or_none(fixtures, tmp_path):
     bogus = tmp_path / "notvideo.mp4"
     bogus.write_bytes(b"nope")
     assert c.first_frame(bogus) is None
+
+
+def test_quality_range_delegates_to_the_engine_with_the_ladder_head():
+    import types as _t
+    from test_gui_controller import _report
+    c = ConverterController(report_provider=_report)
+    c._report = _report()
+    seen = {}
+
+    def fake_qr(target, encoder=None):
+        seen["target"], seen["encoder"] = target, encoder
+        return (2, 63, 30)
+
+    c._video_engine = _t.SimpleNamespace(quality_range=fake_qr)
+    # the GUI asks per target; the engine answers for the encoder that runs
+    assert c.quality_range("video", "av1") == (2, 63, 30)
+    assert seen == {"target": "av1", "encoder": "libsvtav1"}
+    # non-video targets have no quality knob at all - say so, never guess
+    assert c.quality_range("image", "webp") is None
+    assert c.quality_range("video", "") is None

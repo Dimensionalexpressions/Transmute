@@ -237,7 +237,9 @@ class MainWindow(QMainWindow):
         self.enc_box = QComboBox()
         self.enc_box.currentIndexChanged.connect(
             lambda *_: (self._update_enc_note(),
-                        self._apply_option_visibility()))
+                        # manual encoder picks change what the quality knob
+                        # means and which rows apply - resync everything
+                        self._sync_options_enabled()))
         rv.addRow("Encoder", self.enc_box)
         # ---- P3 video options: every one of these maps 1:1 to a controller
         # kwarg; nothing here decides anything itself (F2/F15: remux is a
@@ -574,15 +576,63 @@ class MainWindow(QMainWindow):
 
     def _update_crf_word(self) -> None:
         crf = self.crf_box.value()
-        if crf >= 32:
-            word = "small file"
-        elif crf >= 24:
-            word = "balanced"
-        elif crf >= 18:
-            word = "high quality"
+        lo, hi = self.crf_box.minimum(), self.crf_box.maximum()
+        knob = "QP" if hi >= 255 else "CRF"  # librav1e speaks -qp, not CRF
+        if (lo, hi) == (0, 51):
+            # the x264/x265 scale - the words users already know
+            if crf >= 32:
+                word = "small file"
+            elif crf >= 24:
+                word = "balanced"
+            elif crf >= 18:
+                word = "high quality"
+            else:
+                word = "near-lossless"
         else:
-            word = "near-lossless"
-        self.lbl_crf_word.setText(f"CRF {crf} · {word}")
+            # other encoders carry their own scale: judge POSITION, never the
+            # raw number - CRF 30 is "balanced" for SVT-AV1 but enormous
+            # for x264 (live bug: absolute words lied across scales)
+            frac = (hi - crf) / (hi - lo) if hi > lo else 0.0
+            if frac >= 0.82:
+                word = "near-lossless"
+            elif frac >= 0.70:
+                word = "high quality"
+            elif frac >= 0.35:
+                word = "balanced"
+            else:
+                word = "small file"
+        self.lbl_crf_word.setText(f"{knob} {crf} · {word}")
+
+    def _sync_quality_scale(self) -> None:
+        """Each encoder carries its OWN quality scale and the slider must
+        follow the encoder that will run (live bug: AV1/SVT-AV1 shown on
+        x264's 0..51 made CRF 0 the "better" end, where SVT collapses and
+        a sample measured SMALLER than CRF 10 - better got smaller).
+        When the scale changes the selector restarts at the default the
+        new encoder itself measured; the value never silently re-maps."""
+        cat = self.cat_box.currentText()
+        target = self._current_target()
+        rng = None
+        if cat == "video" and target:
+            try:
+                rng = self.ctrl.quality_range(cat, target)
+            except Exception:
+                rng = None
+        if rng is None:
+            return
+        lo, hi, dflt = rng
+        if (self.crf_box.minimum(), self.crf_box.maximum()) == (lo, hi):
+            return
+        for w in (self.crf_box, self.qslider):
+            w.blockSignals(True)
+        self.crf_box.setRange(lo, hi)
+        self.qslider.setRange(lo, hi)
+        self.crf_box.setValue(dflt)
+        self.qslider.setValue(dflt)
+        for w in (self.crf_box, self.qslider):
+            w.blockSignals(False)
+        self._update_crf_word()
+        self._est_dirty()
 
     def _est_dirty(self) -> None:
         # ONE coalescing timer, restarted per movement: a slider drag causes
@@ -844,6 +894,7 @@ class MainWindow(QMainWindow):
         self.rad_crf.setEnabled(rate)
         self.rad_size.setEnabled(rate)
         self._sync_preset_enabled()
+        self._sync_quality_scale()
         self.crf_box.setEnabled(rate and self.rad_crf.isChecked())
         self.qslider.setEnabled(rate and self.rad_crf.isChecked())
         self.size_box.setEnabled(rate and self.rad_size.isChecked())

@@ -255,3 +255,51 @@ class TestHardwareParsers:
         nv = next(d for d in c.devices() if "nvidia" in d["id"])
         assert nv["disabled"] is True and "CPU is chosen" in nv["why"]
         assert "-22" not in nv["why"]
+
+    def test_mid_benchmark_gpu_says_measuring_not_broken(self, hw, tmp_path,
+                                                         monkeypatch):
+        """Right after the user picks a GPU, measuring switched on but the
+        in-memory report still holds yesterday's skipped rows. Showing them
+        as '(not working here)' told the user his just-chosen RTX 5090 was
+        broken (real screenshot, 2026-11). It must say 'measuring'."""
+        import dataclasses
+        from transmute.paths import AppPaths
+        monkeypatch.delenv("TRANSMUTE_DISABLE_GPU", raising=False)
+        rep = _rep()
+        skipped = [dataclasses.replace(
+            e, verified=False, fps=None, reason=None,
+            skipped="gpu-probe-disabled (TRANSMUTE_DISABLE_GPU)")
+            if e.hw else e for e in rep.encoders]
+        c = ConverterController(report_provider=lambda *a, **k:
+                                dataclasses.replace(rep, encoders=skipped),
+                                queue=object(), paths=AppPaths(root=tmp_path))
+        nv = next(d for d in c.devices() if "nvidia" in d["id"])
+        assert nv["works"] is False and nv["disabled_kind"] == "measuring"
+        assert nv["disabled"] is False
+        assert "measuring this GPU" in nv["why"]
+
+    def test_real_measurements_still_judge_alongside_skipped_rows(self, hw,
+                                                                  tmp_path,
+                                                                  monkeypatch):
+        """Skipped rows are ignored, but ANY real verdict in the same
+        backend group stays authoritative - measuring must not whitewash a
+        genuinely broken encoder."""
+        import dataclasses
+        from transmute.paths import AppPaths
+        monkeypatch.delenv("TRANSMUTE_DISABLE_GPU", raising=False)
+        rep = _rep()
+        mixed = [dataclasses.replace(
+            e, verified=False, fps=None, reason=None,
+            skipped="gpu-probe-disabled (TRANSMUTE_DISABLE_GPU)")
+            if e.name == "libx264_vaapi" else e for e in rep.encoders]
+        mixed.append(EncoderCapability(
+            name="h264_amf", codec="h264", backend="amd-amf", hw=True,
+            verified=False, fps=None, reason="AMF runtime missing"))
+        c = ConverterController(report_provider=lambda *a, **k:
+                                dataclasses.replace(rep, encoders=mixed),
+                                queue=object(), paths=AppPaths(root=tmp_path))
+        amd = next(d for d in c.devices() if d["id"].startswith("gpu:amdgpu"))
+        assert amd["works"] is False and amd["disabled_kind"] == ""
+        assert amd["why"] == "AMF runtime missing"
+        nv = next(d for d in c.devices() if "nvidia" in d["id"])
+        assert "-22" in nv["why"] and nv["disabled_kind"] == ""

@@ -641,13 +641,16 @@ class MainWindow(QMainWindow):
             label = ("CPU - " if d["kind"] == "cpu" else "GPU - ") + d["name"]
             tip = d["name"]
             if not d["works"]:
-                # "not working" and "not being used" are DIFFERENT truths,
-                # and the bare word "off" confused the user (2026-11) - the
-                # suffix states the cause, the tooltip explains in full
+                # three DIFFERENT truths, three wordings (user, 2026-11):
+                # idle-by-choice, mid-benchmark, or genuinely measured broken
+                kind = d.get("disabled_kind")
                 if d.get("disabled"):
                     label += ("  (not in use - CPU is chosen)"
-                              if d.get("disabled_kind") == "cpu-selected"
+                              if kind == "cpu-selected"
                               else "  (not in use right now)")
+                    tip = f"{d['name']} - {d['why']}"
+                elif kind == "measuring":
+                    label += "  (measuring now...)"
                     tip = f"{d['name']} - {d['why']}"
                 else:
                     label += "  (not working here)"
@@ -994,6 +997,12 @@ class MainWindow(QMainWindow):
             if dev is not None and cat in ("video", "audio"):
                 # device pinned: the empty ladder is the DEVICE's fact, say
                 # so with the probe's own words (doctrine: visible + reason)
+                if dev.get("disabled_kind") == "measuring":
+                    # mid-benchmark: 'no verified encoder' would be a
+                    # verdict from a measurement still running (2026-11)
+                    self.lbl_note.setText(f"{dev['name']} - {dev['why']}")
+                    self.lbl_note.setToolTip(dev["why"])
+                    return
                 self.lbl_note.setText(
                     f"{dev['name']} has no verified encoder for this here"
                     f" ({dev['why']}).")

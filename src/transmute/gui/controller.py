@@ -52,11 +52,15 @@ _GPU_NAME_FALLBACK = {
 }
 
 
+# probe records this on rows it skipped because GPUs were held out - a
+# skipped row is the app's OWN past, never a GPU's measured verdict
+_PROBE_OFF_MARK = "gpu-probe-disabled"
+
+
 def _gpu_gpu_tools_enabled() -> bool:
     """GPU ENCODE MEASUREMENT switch (probe + picker reasons). It gates
     encoders, never the device INVENTORY: reading a name from nvidia-smi or
-    lspci encodes nothing, so the picker keeps showing real device names and
-    says honestly "switched off" instead of pretending the device is gone."""
+    lspci encodes nothing, so the picker always shows real device names."""
     import os
     return os.environ.get("TRANSMUTE_DISABLE_GPU", "").lower() not in (
         "1", "true", "yes")
@@ -519,34 +523,47 @@ class ConverterController:
         # the user (2026-11): the entry must name the cause, in user words.
         off_kind = "cpu-selected" if self.device() == "cpu" else "launch"
 
-        def status(backends: tuple[str, ...]) -> tuple[bool, str, bool]:
-            """(works, why, not_in_use). Measurement OFF outranks any
-            cached verdict: a device the app is not looking at right now
-            is simply not in use, and showing its stale last-known failure
-            as the current state would be the machine's yesterday, not its
-            truth. Pick it (or Auto) and the re-probe replaces this with
-            measured facts."""
+        def status(backends: tuple[str, ...]) -> tuple[bool, str, str]:
+            """(works, why, state). state: "" healthy/measured-broken,
+            "cpu-selected"/"launch" idle-by-choice, "measuring" the picker
+            switched measuring back on and the re-benchmark is still
+            running. Doctrine: never dress one truth as another - a stale
+            'probe was switched off' row is NOT a measurement, and a
+            mid-benchmark device is not 'not working' (a healthy RTX 5090
+            was shown as broken exactly this way, user screenshot 2026-11)."""
             if gpu_off and "cpu" not in backends:
                 if off_kind == "cpu-selected":
                     return False, ("Transmute isn't using this GPU right now, "
                                    "because CPU is chosen under CPU / GPU. "
                                    "Choose Auto or this GPU and Transmute "
-                                   "measures it on this PC, then uses it."), True
+                                   "measures it on this PC, then uses it."), \
+                        "cpu-selected"
                 return False, ("GPU use is disabled for this launch of "
                                "Transmute (TRANSMUTE_DISABLE_GPU). Choose "
                                "Auto or this device and Transmute measures "
-                               "it on this PC."), True
+                               "it on this PC."), "launch"
             mine = [e for e in rows if e.backend in backends]
+            if "cpu" not in backends and mine:
+                # rows skipped because the probe ran with GPUs held out are
+                # the app's own yesterday, not this GPU's verdict
+                stale = [e for e in mine
+                         if _PROBE_OFF_MARK in (e.skipped or "")
+                         or _PROBE_OFF_MARK in (e.reason or "")]
+                if len(stale) == len(mine):
+                    return False, ("Transmute is measuring this GPU on this "
+                                   "PC right now - results appear when the "
+                                   "benchmark finishes."), "measuring"
+                mine = [e for e in mine if e not in stale]
             if any(e.verified for e in mine):
-                return True, "", False
+                return True, "", ""
             for e in mine:
                 if e.reason or e.skipped:
-                    return False, (e.reason or e.skipped), False
+                    return False, (e.reason or e.skipped), ""
             if mine:
-                return False, "never verified on this machine", False
-            return False, "no encoder for it in this ffmpeg build", False
+                return False, "never verified on this machine", ""
+            return False, "no encoder for it in this ffmpeg build", ""
 
-        ok, why, _off = status(("cpu",))
+        ok, why, _state = status(("cpu",))
         devs: list[dict[str, Any]] = [{
             "id": "cpu", "kind": "cpu", "name": cpu_model(),
             "backends": ["cpu"], "works": ok, "why": why, "disabled": False,
@@ -572,12 +589,12 @@ class ConverterController:
                     or _GPU_NAME_FALLBACK.get(driver, "your GPU"))
                 if count > 1:
                     name = f"{name} ({count} identical GPUs)"
-            ok, why, off = status(tuple(backends))
+            ok, why, state = status(tuple(backends))
             devs.append({
                 "id": f"gpu:{driver}:{devid}", "kind": "gpu", "name": name,
                 "backends": backends, "works": ok, "why": why,
-                "disabled": off,
-                "disabled_kind": off_kind if off else "",
+                "disabled": state in ("cpu-selected", "launch"),
+                "disabled_kind": state,
             })
         self._devices_cache = (report, devs)
         return devs

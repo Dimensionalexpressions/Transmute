@@ -209,11 +209,12 @@ class TestHardwareParsers:
         assert "RTX 9999" in C.lspci_product("00:02.0")
         assert seen == ["nvidia-smi", "lspci"]
 
-    def test_switched_off_says_switched_off_not_broken(self, hw, tmp_path,
-                                                       monkeypatch):
+    def test_idle_gpu_says_why_in_user_words(self, hw, tmp_path, monkeypatch):
         """GPU measurement off -> report has no GPU rows -> the entry's own
-        reason must be 'switched off', never 'not in this ffmpeg build'
-        (which told a healthy RTX 5090 it was broken - real user, 2026-11)."""
+        reason must state the CAUSE in user words, never 'not in this ffmpeg
+        build' (which told a healthy RTX 5090 it was broken - real user,
+        2026-11). And the bare word 'switched off' confused the user too:
+        the message must say WHO holds it out and HOW to change that."""
         import dataclasses
         from transmute.paths import AppPaths
         rep = _rep()
@@ -226,19 +227,31 @@ class TestHardwareParsers:
         assert len(gpus) == 2
         for d in gpus:
             assert d["works"] is False and d["disabled"] is True
-            assert "switched off" in d["why"]
+            # no device chosen -> a launch-time hold; cause named anyway
+            assert d["disabled_kind"] == "launch"
+            assert "GPU use is disabled for this launch" in d["why"]
+            assert "switched off" not in d["why"]  # the confusing word, banned
+            assert "ffmpeg build" not in d["why"]
         cpu = next(d for d in c.devices() if d["kind"] == "cpu")
         assert cpu["disabled"] is False and cpu["works"] is True
+        # the everyday case: the CPU / GPU choice IS the cause - say so
+        c.set_device("cpu")
+        for d in c.devices():
+            if d["kind"] == "gpu":
+                assert d["disabled_kind"] == "cpu-selected"
+                assert "because CPU is chosen" in d["why"]
+                assert "measures it on this PC" in d["why"]
 
-    def test_switched_off_outranks_stale_measurements(self, hw, tmp_path,
-                                                      monkeypatch):
+    def test_cpu_choice_outranks_stale_measurements(self, hw, tmp_path,
+                                                    monkeypatch):
         """A GPU whose probe rows carry an old measured failure is STILL
-        merely switched off while measurement is disabled - yesterday's
-        verdict must not masquerade as today's state (cache said so)."""
+        merely idle while CPU is chosen - yesterday's verdict must not
+        masquerade as today's state (the cache said so, 2026-11)."""
         from transmute.paths import AppPaths
         monkeypatch.setenv("TRANSMUTE_DISABLE_GPU", "1")
         c = ConverterController(report_provider=_rep, queue=object(),
                                 paths=AppPaths(root=tmp_path))
+        c.set_device("cpu")
         nv = next(d for d in c.devices() if "nvidia" in d["id"])
-        assert nv["disabled"] is True and "switched off" in nv["why"]
+        assert nv["disabled"] is True and "CPU is chosen" in nv["why"]
         assert "-22" not in nv["why"]

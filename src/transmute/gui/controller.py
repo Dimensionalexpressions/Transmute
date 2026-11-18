@@ -513,17 +513,29 @@ class ConverterController:
             return cached[1]
         rows = list(getattr(report, "encoders", []))
         gpu_off = not _gpu_gpu_tools_enabled()
+        # WHY the GPUs are idle matters to the user: normally the CPU/GPU
+        # choice is set to CPU (so the app itself holds the GPUs out), only
+        # rarely is it a launch-time override. "switched off" alone confused
+        # the user (2026-11): the entry must name the cause, in user words.
+        off_kind = "cpu-selected" if self.device() == "cpu" else "launch"
 
         def status(backends: tuple[str, ...]) -> tuple[bool, str, bool]:
-            """(works, why, switched_off). Measurement OFF outranks any
-            cached verdict: a device the app is not looking at right now is
-            switched off, and showing its stale last-known failure as the
-            current state would be the machine's yesterday, not its truth.
-            Pick it (or Auto) and the re-probe replaces this with measured
-            facts."""
+            """(works, why, not_in_use). Measurement OFF outranks any
+            cached verdict: a device the app is not looking at right now
+            is simply not in use, and showing its stale last-known failure
+            as the current state would be the machine's yesterday, not its
+            truth. Pick it (or Auto) and the re-probe replaces this with
+            measured facts."""
             if gpu_off and "cpu" not in backends:
-                return False, ("GPU use is switched off - pick Auto or "
-                               "this device and Transmute measures it here"), True
+                if off_kind == "cpu-selected":
+                    return False, ("Transmute isn't using this GPU right now, "
+                                   "because CPU is chosen under CPU / GPU. "
+                                   "Choose Auto or this GPU and Transmute "
+                                   "measures it on this PC, then uses it."), True
+                return False, ("GPU use is disabled for this launch of "
+                               "Transmute (TRANSMUTE_DISABLE_GPU). Choose "
+                               "Auto or this device and Transmute measures "
+                               "it on this PC."), True
             mine = [e for e in rows if e.backend in backends]
             if any(e.verified for e in mine):
                 return True, "", False
@@ -538,6 +550,7 @@ class ConverterController:
         devs: list[dict[str, Any]] = [{
             "id": "cpu", "kind": "cpu", "name": cpu_model(),
             "backends": ["cpu"], "works": ok, "why": why, "disabled": False,
+            "disabled_kind": "",
         }]
         gpu_nodes = gpu_render_nodes()
         nv_names = nvidia_gpu_names()
@@ -564,6 +577,7 @@ class ConverterController:
                 "id": f"gpu:{driver}:{devid}", "kind": "gpu", "name": name,
                 "backends": backends, "works": ok, "why": why,
                 "disabled": off,
+                "disabled_kind": off_kind if off else "",
             })
         self._devices_cache = (report, devs)
         return devs

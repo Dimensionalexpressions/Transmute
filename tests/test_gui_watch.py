@@ -99,46 +99,105 @@ def window(qapp):
 NONNATIVE = QFileDialog.Option.DontUseNativeDialog
 
 
+class _ExecRecorder:
+    """Patch QFileDialog.exec: record every dialog the app opens, then answer
+    with the queued codes (Rejected unless given). The dialog objects stay
+    inspectable afterwards - options, mode, sidebar - exactly what the bug
+    needs pinned: a volume mounted AFTER start must be pickable."""
+
+    def __init__(self, monkeypatch, answers=()):
+        self.opened: list[QFileDialog] = []
+        self._answers = list(answers)
+        from PySide6.QtWidgets import QDialog
+        self._Accepted = QDialog.DialogCode.Accepted
+        self._Rejected = QDialog.DialogCode.Rejected
+        # a deterministic "selection" for accepted dialogs (the offscreen
+        # file-view model would only make this test flakier, not stricter)
+        monkeypatch.setattr(QFileDialog, "selectedFiles",
+                            lambda self: ["/tmp"])
+
+        def fake_exec(dlg):
+            self.opened.append(dlg)
+            return self._answers.pop(0) if self._answers else self._Rejected
+        monkeypatch.setattr(QFileDialog, "exec", fake_exec)
+
+
 class TestDialogsRescanMounts:
-    """User-reported stale drive in Add files: every dialog must be the Qt
-    one - the native (portal/KDE) dialog serves cached volume lists."""
+    """User-reported stale drive in Add files: every picker is the Qt dialog
+    (rebuilt per open) whose sidebar is re-seeded from /proc/mounts each time -
+    Qt's own mount/volume caches go stale for late mounts (VeraCrypt reports
+    no D-Bus change at all)."""
 
-    def test_add_files_dialog_is_nonnative(self, window, monkeypatch):
-        seen = []
-
-        def fake(parent, caption, directory, *a, **kw):
-            seen.append(kw.get("options", 0))
-            return [], ""
-        monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(fake))
+    def test_add_files_dialog_is_nonnative_existing_files(self, window,
+                                                          monkeypatch):
+        rec = _ExecRecorder(monkeypatch)
         window._add_dialog()
-        assert seen and all(o & NONNATIVE for o in seen)
+        assert len(rec.opened) == 1
+        dlg = rec.opened[0]
+        assert dlg.options() & NONNATIVE
+        assert dlg.fileMode() == QFileDialog.FileMode.ExistingFiles
 
-    def test_destination_dialog_is_nonnative(self, window, monkeypatch):
-        seen = []
-
-        def fake(parent, caption, directory, *a, **kw):
-            seen.append(kw.get("options", 0))
-            return "/tmp/somewhere"
-        monkeypatch.setattr(QFileDialog, "getExistingDirectory",
-                            staticmethod(fake))
+    def test_destination_dialog_is_nonnative_directory_mode(self, window,
+                                                            monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        rec = _ExecRecorder(monkeypatch, answers=[QDialog.DialogCode.Accepted])
+        window.dst_edit.setText("")
         window._choose_dst()
-        assert seen and all(o & NONNATIVE for o in seen)
+        assert len(rec.opened) == 1
+        dlg = rec.opened[0]
+        assert dlg.options() & NONNATIVE
+        assert dlg.fileMode() == QFileDialog.FileMode.Directory
+        assert window.dst_edit.text() == "/tmp"
 
-    def test_watch_dialog_pair_is_nonnative(self, window, monkeypatch):
-        seen, calls = [], []
-
-        def fake(parent, caption, directory, *a, **kw):
-            seen.append(kw.get("options", 0))
-            calls.append(caption)
-            return "/tmp/watch-src" if len(calls) == 1 else ""
-        monkeypatch.setattr(QFileDialog, "getExistingDirectory",
-                            staticmethod(fake))
+    def test_watch_dialog_pair_nonnative_second_cancel_means_no_rule(
+            self, window, monkeypatch):
+        from PySide6.QtWidgets import QDialog
+        rec = _ExecRecorder(
+            monkeypatch,
+            answers=[QDialog.DialogCode.Accepted, QDialog.DialogCode.Rejected])
         added = []
         monkeypatch.setattr(window, "_watch_add",
                             lambda s, d: added.append((s, d)))
         window._watch_add_dialog()
-        assert len(seen) == 2 and all(o & NONNATIVE for o in seen)
+        assert len(rec.opened) == 2
+        assert all(d.options() & NONNATIVE for d in rec.opened)
+        assert all(d.fileMode() == QFileDialog.FileMode.Directory
+                   for d in rec.opened)
         assert added == []  # second dialog cancelled -> no rule (F3: no guess)
+
+    def test_sidebar_includes_volume_mounted_after_start(self, window,
+                                                         monkeypatch,
+                                                         tmp_path):
+        # stand-in for /run/media/veracrypt11 appearing mid-session
+        vol = tmp_path / "veracrypt11"
+        vol.mkdir()
+        monkeypatch.setattr("transmute.gui.app._live_volume_roots",
+                            lambda: [str(vol)])
+        rec = _ExecRecorder(monkeypatch)
+        window._add_dialog()
+        assert len(rec.opened) == 1
+        from PySide6.QtCore import QUrl
+        assert QUrl.fromLocalFile(str(vol)) in rec.opened[0].sidebarUrls()
+
+    def test_mount_table_parsing_edges(self):
+        from transmute.gui.app import _mount_roots_from_table
+        table = "\n".join([
+            "/dev/sda1 /run/media/veracrypt11 ext4 rw 0 0",
+            "/dev/sdb1 /run/media/kieros/My\\040Disk ext4 rw 0 0",
+            "/dev/sdc1 /tmp/.veracrypt_aux_mnt1 fuse rw 0 0",
+            "overlay /run/media/u/vol/sub ext4 rw 0 0",
+            "/dev/sdd1 /mnt/data xfs rw 0 0",
+            "/dev/sde1 /mnt ext4 rw 0 0",
+            "tmpfs /media/kieros/Fedora\\011USB tmpfs rw 0 0",
+            "proc /proc proc rw 0 0",
+        ])
+        assert _mount_roots_from_table(table) == [
+            "/run/media/veracrypt11",  # the reported case
+            "/run/media/kieros/My Disk",  # \040 = space
+            "/mnt/data",
+            "/media/kieros/Fedora\tUSB",  # \011 = tab
+        ]
+
 
 
 class TestWatchRules:

@@ -511,7 +511,7 @@ class TestAdaptivePanel:
     def test_audio_shows_no_video_or_pdf_controls(self, window):
         self._pick(window, "audio")
         self._hidden(window, "chk_remux", "deep_pdf", "quality", "rad_crf",
-                     "chk_tonemap", "btn_adv", "adv_frame")
+                     "chk_tonemap", "adv_header", "adv_frame")
 
     def test_video_shows_only_video_controls(self, window):
         self._pick(window, "video")

@@ -13,12 +13,12 @@ import os
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QPalette, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QFrame, QProgressBar, QPushButton, QRadioButton, QSlider,
+    QFrame, QDialog, QProgressBar, QPushButton, QRadioButton, QSlider,
     QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -46,6 +46,86 @@ def _fmt_bytes(n: float) -> str:
     if n < 1e9:
         return f"{n / 1e6:.0f} MB"
     return f"{n / 1e9:.2f} GB"
+
+
+def _sidebar_urls_with_fresh_mounts() -> "list[QUrl]":
+    """Qt sidebar URLs with any currently-mounted volumes injected.
+
+    The Qt non-native file dialog's sidebar is populated from QSettings
+    bookmarks (saved by the desktop environment).  Drives that are mounted
+    after those bookmarks were written -- or that were never bookmarked --
+    never appear.  We add every live /run/media/<user>/* and /media/<user>/*
+    volume path at dialog-open time so the sidebar is always current."""
+    urls: list[QUrl] = []
+    # standard Qt sidebar (Home, Desktop, Documents …)
+    try:
+        dlg_probe = QFileDialog()
+        urls = list(dlg_probe.sidebarUrls())
+        dlg_probe.deleteLater()
+    except Exception:  # noqa: BLE001
+        pass
+    # live removable / external volumes - /proc/mounts is ground truth and
+    # never cached (QStorageInfo can serve a per-process snapshot, which is
+    # part of why mounts made after launch stayed invisible)
+    for root in _live_volume_roots():
+        u = QUrl.fromLocalFile(root)
+        if u not in urls:
+            urls.append(u)
+    return urls
+
+
+def _live_volume_roots() -> list[str]:
+    """User-visible volume mount points live from /proc/mounts."""
+    try:
+        raw = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [p for p in _mount_roots_from_table(raw) if Path(p).is_dir()]
+
+
+def _mount_roots_from_table(raw: str) -> list[str]:
+    """Decode a /proc/mounts table (pure: no I/O) to volume roots only:
+    /run/media/[<user>/]<vol>, /media/[<user>/]<vol>, /mnt/<vol>. Auxiliary
+    binds (/tmp/.veracrypt_aux_mnt1…) and nested submounts stay excluded."""
+    out: list[str] = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mnt = (parts[1].replace("\\040", " ")
+               .replace("\\011", "\t").replace("\\134", "\\"))
+        depth = mnt.strip("/").split("/")
+        # /run/media/<vol> (VeraCrypt) AND /run/media/<user>/<vol> (KDE/udisks)
+        # are both real volume roots; anything nested deeper is a submount.
+        if mnt.startswith("/run/media/") and len(depth) in (3, 4):
+            out.append(mnt)
+        elif mnt.startswith("/media/") and len(depth) in (2, 3):
+            out.append(mnt)
+        elif mnt.startswith("/mnt/") and len(depth) == 2:
+            out.append(mnt)
+    return list(dict.fromkeys(out))
+
+
+def _show_open_files_dialog(parent: QWidget, caption: str, directory: str,
+                             ) -> "list[str]":
+    """Non-native multi-file picker with an up-to-date sidebar."""
+    dlg = QFileDialog(parent, caption, directory)
+    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    dlg.setSidebarUrls(_sidebar_urls_with_fresh_mounts())
+    return dlg.selectedFiles() if dlg.exec() == QDialog.DialogCode.Accepted else []
+
+
+def _show_existing_dir_dialog(parent: QWidget, caption: str, directory: str,
+                               ) -> str:
+    """Non-native single-directory picker with an up-to-date sidebar."""
+    dlg = QFileDialog(parent, caption, directory)
+    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+    dlg.setFileMode(QFileDialog.FileMode.Directory)
+    dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dlg.setSidebarUrls(_sidebar_urls_with_fresh_mounts())
+    sel = dlg.selectedFiles() if dlg.exec() == QDialog.DialogCode.Accepted else []
+    return sel[0] if sel else ""
 
 
 class MainWindow(QMainWindow):
@@ -297,10 +377,11 @@ class MainWindow(QMainWindow):
         # like the parent products. The difference: those numbers stay
         # MEASURED on this PC (a real sample re-encoded at each new setting) -
         # between measurements the label honestly says "measuring…".
-        self.btn_adv = QPushButton("▸ Advanced (fine-tune quality & audio)")
-        self.btn_adv.setFlat(True)
-        self.btn_adv.clicked.connect(self._toggle_adv)
-        rv.addRow(self.btn_adv)
+        # Not a click-to-open dropdown: hidden controls are invisible controls
+        # (user feedback), so this header sits above always-visible rows.
+        self.adv_header = QLabel("Advanced (fine-tune quality & audio)")
+        self.adv_header.setStyleSheet("font-weight:bold;")
+        rv.addRow(self.adv_header)
         self.adv_frame = QFrame()
         af = QFormLayout(self.adv_frame)
         af.setContentsMargins(12, 0, 0, 0)
@@ -369,8 +450,7 @@ class MainWindow(QMainWindow):
         arow.addWidget(self.audio_kbps)
         arow.addStretch(1)
         af.addRow("Audio", arow)
-        rv.addRow(self.adv_frame)
-        self.adv_frame.setVisible(False)  # start folded; ▸ reveals it
+        rv.addRow(self.adv_frame)  # always open; category visibility below
         self._update_crf_word()
         self.quality = QSpinBox()
         self.quality.setRange(10, 100)
@@ -393,7 +473,7 @@ class MainWindow(QMainWindow):
             "remux": self._row_of(self.chk_remux),
             "remux_into": self._row_of(self.remux_box),
             "tone": self._row_of(self.chk_tonemap),
-            "adv_btn": self._row_of(self.btn_adv),
+            "adv_btn": self._row_of(self.adv_header),
             "adv": self._row_of(self.adv_frame),
             "rate": self._row_of(self.rad_crf),
             "quality": self._row_of(self.quality),
@@ -443,12 +523,14 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- slots
     def _add_dialog(self) -> None:
-        # NON-native by deliberate choice: Qt's own dialog enumerates mounts
-        # when it opens, so a drive plugged in since launch appears (the KDE
-        # native dialog served a stale cached bookmark - real user, 2026-11).
-        names, _ = QFileDialog.getOpenFileNames(
-            self, "Add files", str(Path.home()),
-            options=QFileDialog.Option.DontUseNativeDialog)
+        # NON-native and sidebar rebuilt from the LIVE mount table on every
+        # open. The old assumption - "Qt enumerates mounts when the dialog
+        # opens, so a newly attached drive shows up" - was false: Qt caches
+        # the mount table per process (and VeraCrypt-style mounts emit no
+        # notification at all), so a volume mounted after launch stayed
+        # invisible no matter how often the dialog was reopened (real user,
+        # 2026-11; see _sidebar_urls_with_fresh_mounts).
+        names = _show_open_files_dialog(self, "Add files", str(Path.home()))
         for n in names:
             self._add_one(Path(n))
 
@@ -478,9 +560,8 @@ class MainWindow(QMainWindow):
         self._est_dirty()
 
     def _choose_dst(self) -> None:
-        d = QFileDialog.getExistingDirectory(
-            self, "Destination", self.dst_edit.text() or str(Path.home()),
-            options=QFileDialog.Option.DontUseNativeDialog)
+        d = _show_existing_dir_dialog(
+            self, "Destination", self.dst_edit.text() or str(Path.home()))
         if d:
             self.dst_edit.setText(d)
 
@@ -977,10 +1058,10 @@ class MainWindow(QMainWindow):
         self._toggle_row(self._row["remux"], video)
         self._toggle_row(self._row["remux_into"], video and self.chk_remux.isChecked())
         self._toggle_row(self._row["tone"], video)
+        # advanced rows are always open (user feedback: collapsed = invisible);
+        # they only hide for categories that have no quality/audio knobs
         self._toggle_row(self._row["adv_btn"], video)
-        # the disclosure keeps its own open/closed state (never auto-opens)
-        self._toggle_row(self._row["adv"],
-                         video and getattr(self, "_adv_open", False))
+        self._toggle_row(self._row["adv"], video)
         self._toggle_row(self._row["rate"], video)
         self._toggle_row(self._row["quality"], cat == "image")
         # per-page/text exports bypass the lossless ladder - a deep pass is
@@ -1185,15 +1266,16 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------- watch folders
     def _watch_add_dialog(self) -> None:
-        opts = QFileDialog.Option.DontUseNativeDialog  # fresh mounts (SPEC F.3)
-        src = QFileDialog.getExistingDirectory(
+        # sidebar rebuilt from the live mount table on every open
+        # (see _sidebar_urls_with_fresh_mounts)
+        src = _show_existing_dir_dialog(
             self, "Folder to watch (new files get converted)",
-            str(Path.home()), options=opts)
+            str(Path.home()))
         if not src:
             return
-        dst = QFileDialog.getExistingDirectory(
+        dst = _show_existing_dir_dialog(
             self, "Where converted files go (must be a different tree)",
-            src, options=opts)
+            src)
         if not dst:
             return
         self._watch_add(Path(src), Path(dst))

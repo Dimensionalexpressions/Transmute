@@ -364,6 +364,34 @@ class MainWindow(QMainWindow):
         # so every speed number and estimate that follows belongs to it.
         more = QGroupBox("More…")
         mform = QFormLayout(more)
+        # Performance wish (user-approved Option 2): ONE control for what
+        # the machine optimises for. It never invents capability - it
+        # filters the verified ladder; a wish this PC cannot honour falls
+        # back to the fastest verified path and says so on the line below.
+        self.perf_box = QComboBox()
+        for _lbl, _val, _tip in (
+            ("Auto - this PC decides (recommended)", "auto",
+             "Encode with whatever this machine MEASURED fastest for this\n"
+             "format, and decode on the GPU whenever the probe's trial\n"
+             "proved GPU decoding here. The measured speeds are listed\n"
+             "under the target details."),
+            ("Quality-first - CPU encoder, best picture", "quality",
+             "Keep compression on the CPU encoders (e.g. x264/x265): they\n"
+             "give the best quality per byte, at CPU speed. Video\n"
+             "decoding still uses the GPU when proven. Falls back, with\n"
+             "an explanation, if no CPU encoder works for this format."),
+            ("Speed-first - graphics card when it works", "speed",
+             "Encode on the graphics-card encoder when this PC has one\n"
+             "that passed a real trial encode; otherwise the fastest CPU\n"
+             "encoder does it, and the line below says why."),
+        ):
+            self.perf_box.addItem(_lbl, _val)
+            self.perf_box.setItemData(
+                self.perf_box.count() - 1, _tip, Qt.ItemDataRole.ToolTipRole)
+        _i = self.perf_box.findData(self.ctrl.perf_mode())
+        self.perf_box.setCurrentIndex(_i if _i >= 0 else 0)
+        self.perf_box.currentIndexChanged.connect(self._on_perf_pick)
+        mform.addRow("Performance", self.perf_box)
         self.device_box = QComboBox()
         self.device_box.setToolTip(
             "Choose which hardware encodes and decodes.\n"
@@ -380,6 +408,10 @@ class MainWindow(QMainWindow):
         self.lbl_dec.setWordWrap(True)
         mform.addRow(self.lbl_dec)
         self.lbl_dec.hide()
+        # the first _load_devices() above ran before this row existed (its
+        # end calls _update_decode_line); now that the row does exist, show
+        # what the boot probe measured - the line must never boot invisible
+        self._update_decode_line()
         rv.addRow(more)
         qlrow = QHBoxLayout()
         self.rad_crf = QRadioButton("Quality (CRF)")
@@ -698,19 +730,39 @@ class MainWindow(QMainWindow):
         pretty = {"cuda": "NVIDIA GPU (NVDEC)",
                   "vaapi": "GPU via VA-API"}.get(gd.get("api", ""),
                                                  gd.get("api", ""))
+        base = ""
         if gd.get("available"):
-            lbl.setText(f"Video decoding: on the GPU ({pretty})")
-            lbl.setStyleSheet(self._ok_c)
-            lbl.show()
+            base = f"Video decoding: on the GPU ({pretty})"
         elif gd.get("attempted"):
             why = (gd.get("reason") or "").strip() or "this GPU declined to decode"
             if len(why) > 160:
                 why = why[:157] + "..."
-            lbl.setText(f"Video decoding: on the CPU - {why}")
-            lbl.setStyleSheet(self._warn_c)
-            lbl.show()
-        else:
+            base = f"Video decoding: on the CPU - {why}"
+        # when the Quality/Speed wish could not be honoured on this PC, the
+        # same line carries the machine's own reason - never silent
+        wish = self.ctrl.perf_note(self.cat_box.currentText(),
+                                   self._current_target() or "")
+        if wish:
+            wish = wish[0].upper() + wish[1:] + "."
+        text = " · ".join(t for t in (base, wish) if t)
+        if not text:
             lbl.hide()
+            return
+        lbl.setText(text)
+        lbl.setStyleSheet(self._warn_c if wish else self._ok_c)
+        lbl.show()
+
+    def _on_perf_pick(self, _idx: int) -> None:
+        """Mode changed: the encoder ladder changes under the Encoder box,
+        the quality knob's scale belongs to a different encoder, and every
+        estimate measured against the old one is stale. No re-probe - the
+        measurements don't depend on the wish."""
+        self.ctrl.set_perf_mode(self.perf_box.currentData() or "auto")
+        self._load_encoders(0)
+        self._sync_quality_scale()
+        self._update_about()
+        self._update_decode_line()
+        self._est_dirty()
 
     def _on_device_pick(self, _idx: int) -> None:
         dev = self.device_box.currentData() or "auto"

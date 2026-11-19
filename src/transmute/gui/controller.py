@@ -517,7 +517,7 @@ class ConverterController:
         ({} when no report exists yet). Decoding is offloaded to the GPU
         only where this says available - the machine decides, not us."""
         try:
-            return dict(getattr(self.report(), "gpu_decode", None) or {})
+            return dict(getattr(self.report, "gpu_decode", None) or {})
         except Exception:  # noqa: BLE001 - a missing verdict stays silent
             return {}
 
@@ -619,6 +619,44 @@ class ConverterController:
     def set_device(self, dev_id: str) -> None:
         self.set_pref("device", dev_id or "auto")
         self._devices_cache = None
+
+    # ------------------------------------------------- performance wish (Option 2)
+    PERF_MODES = ("auto", "quality", "speed")
+
+    def perf_mode(self) -> str:
+        """What the user wants ENCODING to optimise for: "auto" = whatever
+        this PC measured fastest (the shipped behaviour), "quality" = keep
+        compression on the CPU encoders, "speed" = keep it on the graphics
+        card. Decoding is decided separately by the probe's decode trial -
+        a wish never turns decode off. Persisted, machine-independent; a
+        value this build does not know falls back to auto."""
+        mode = str(self.prefs().get("perf_mode") or "auto")
+        return mode if mode in self.PERF_MODES else "auto"
+
+    def set_perf_mode(self, mode: str) -> None:
+        self.set_pref("perf_mode",
+                      mode if mode in self.PERF_MODES else "auto")
+
+    def perf_note(self, category: str, target: str) -> str:
+        """Empty when this PC can honour the Quality/Speed wish; otherwise
+        the sentence explaining the visible fallback. The mode narrows the
+        verified ladder, it never invents an encoder and never hides that
+        it had to give in."""
+        mode = self.perf_mode()
+        if mode == "auto":
+            return ""
+        rows = self._ladder(category, target)
+        if not rows:
+            return ""
+        if mode == "quality" and not any(
+                not getattr(c, "hw", False) for c in rows):
+            return ("no working CPU encoder for this format here - the "
+                    "graphics-card one does the encoding instead")
+        if mode == "speed" and not any(
+                getattr(c, "hw", False) for c in rows):
+            return ("no graphics-card encoder works on this machine - the "
+                    "fastest CPU encoder does it instead")
+        return ""
 
     def device_backends(self) -> set[str] | None:
         """Backends the chosen device covers; None = Auto (whole ladder).
@@ -757,13 +795,13 @@ class ConverterController:
                 return t
         return None
 
-    def encoders(self, category: str, target: str) -> list[str]:
-        """Verified encoder ladder for a codec target (fastest first, F10),
-        scoped to the CPU/GPU device the user picked (Auto = whole ladder).
-
-        Empty for non-codec targets (image/pdf/document): the engine picks
-        internally; the UI shows the chain label from TargetInfo.note.
-        """
+    def _ladder(self, category: str, target: str):
+        """Verified encoder ROWS (fastest first, F10), device-scoped but
+        BEFORE any performance-mode narrowing - shared by encoders() and
+        perf_note() so the note always describes the very list the picker
+        would show unfiltered. Empty for non-codec targets (image/pdf/
+        document): the engine picks internally; the UI shows the chain
+        label from TargetInfo.note."""
         if category not in ("video", "audio"):
             return []
         try:
@@ -773,7 +811,26 @@ class ConverterController:
         backends = self.device_backends()
         if backends is not None:
             got = [c for c in got if c.backend in backends]
-        return [c.name for c in got]
+        return list(got)
+
+    def _mode_rows(self, rows):
+        """Performance mode filters WHICH verified encoders qualify; it
+        never invents one. A wish this machine cannot honour keeps the full
+        ladder - visibly: perf_note() tells the user why."""
+        mode = self.perf_mode()
+        if mode != "auto" and rows:
+            want_hw = mode == "speed"
+            keep = [c for c in rows
+                    if bool(getattr(c, "hw", False)) is want_hw]
+            if keep:
+                return keep
+        return rows
+
+    def encoders(self, category: str, target: str) -> list[str]:
+        """Verified encoder ladder for a codec target (fastest first),
+        scoped to the CPU/GPU device the user picked (Auto = whole ladder)
+        and narrowed by the performance wish (Auto = no narrowing)."""
+        return [c.name for c in self._mode_rows(self._ladder(category, target))]
 
     def auto_encoder(self, category: str, target: str) -> str | None:
         """The encoder "auto" means HERE AND NOW: fastest verified on this

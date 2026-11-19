@@ -189,7 +189,7 @@ def _run_version(path: Path, args: tuple[str, ...], timeout_s: float) -> str:
     soffice.bin) keeps those pipes open and the probe hangs forever. Popen +
     tree-kill + bounded drain keeps the probe honest on every machine.
     """
-    from ..engines.base import _terminate_tree, drain_bounded
+    from ..engines.base import _terminate_tree, communicate_bounded, drain_bounded
     argv = [str(path), *args]
     popen_kw: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL, text=True,
@@ -202,7 +202,7 @@ def _run_version(path: Path, args: tuple[str, ...], timeout_s: float) -> str:
         popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     proc = subprocess.Popen(argv, **popen_kw)
     try:
-        out, err = proc.communicate(timeout=timeout_s)
+        out, err = communicate_bounded(proc, timeout_s)
         return (out or "") + (err or "")
     except subprocess.TimeoutExpired:
         _terminate_tree(proc)

@@ -149,7 +149,7 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
         threading.Thread(target=_kill_when_cancelled, daemon=True,
                          name="transmute-cancel").start()
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_s)
+        stdout, stderr = communicate_bounded(proc, timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_tree(proc)
@@ -222,27 +222,112 @@ def _win_taskkill_tree(pid: int) -> None:
         pass
 
 
+def _pump_to(stream, box: list) -> None:
+    """Read a pipe to EOF into box[0]; a concurrent close() is a normal end."""
+    try:
+        box[0] = stream.read() or ""
+    except (OSError, ValueError):  # stream closed on deadline - partial stands
+        pass
+
+
+def _drain_threads(proc: subprocess.Popen) -> tuple[list[threading.Thread], list, list]:
+    threads: list[threading.Thread] = []
+    boxes: list[list] = []
+    streams: list = []
+    for stream in (proc.stdout, proc.stderr):
+        box = [""]
+        boxes.append(box)
+        if stream is not None:
+            streams.append(stream)
+            t = threading.Thread(target=_pump_to, args=(stream, box),
+                                 daemon=True, name="transmute-drain")
+            t.start()
+            threads.append(t)
+    return threads, boxes, streams
+
+
+def _quiet_close(stream) -> None:
+    try:
+        stream.close()
+    except Exception:  # noqa: BLE001 - closing a dead/abandoned pipe is noise
+        pass
+
+
+def _close_streams(streams) -> None:
+    """Release our pipe ends WITHOUT ever blocking the caller (both OSes,
+    both live-fire: POSIX 120s waits, Windows an eternal hang).
+
+    CPython serialises close() against in-flight operations: a stream with an
+    abandoned pump thread parked in read() makes close() wait for that read -
+    and a pipe kept open by a survivor grandchild never finishes it. So every
+    close runs in an abandoned daemon thread. If it stalls we hold one fd pair
+    until the writer dies (the close then completes by itself) or the process
+    exits; a hung app is never the trade.
+    """
+    for stream in streams:
+        if stream is None:
+            continue
+        threading.Thread(target=_quiet_close, args=(stream,),
+                         daemon=True, name="transmute-closer").start()
+
+
+def communicate_bounded(proc: subprocess.Popen, timeout_s: float) -> tuple[str, str]:
+    """Popen.communicate(timeout=) whose deadline CPython actually honors.
+
+    CPython's own timeout path is broken on Windows when the pipes outlive the
+    direct child (GUI launchers: soffice.exe exits, soffice.bin converts and
+    holds the write ends): its reader-thread joins carry no deadline, so the
+    TimeoutExpired every caller depends on never fires and the app hangs
+    forever (live-fire: the suite itself stalled there). Here the deadline
+    covers everything, including the wait for EOF - which stays the true
+    completion signal for engine output; overrun raises TimeoutExpired after
+    closing our ends so the daemon readers die instead of piling up.
+    """
+    threads, boxes, streams = _drain_threads(proc)
+    endtime = time.monotonic() + timeout_s
+    for t in threads:
+        t.join(timeout=max(0.0, endtime - time.monotonic()))
+    if any(t.is_alive() for t in threads):
+        _close_streams(streams)
+        raise subprocess.TimeoutExpired(proc.args, timeout_s)
+    out = boxes[0][0] if boxes else ""
+    err = boxes[1][0] if len(boxes) > 1 else ""
+    # all writers are gone; reap the process itself (bounded - process-object
+    # wait only, no pipes involved)
+    try:
+        proc.wait(timeout=max(0.5, endtime - time.monotonic()) + 5)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return out, err
+
+
 def drain_bounded(proc: subprocess.Popen, grace: float) -> tuple[str, str]:
     """Collect remaining output after termination, but NEVER block forever.
 
     A grandchild that survived the kill can keep the pipes open indefinitely
-    (CPython's own subprocess.run(timeout=) hits exactly this on Windows and
-    hangs the caller). When the drain overruns, close our ends and return what
-    we have; a timed-out result is always worth more than a hung app.
+    (exactly the CPython communicate(timeout=) hole above), so this uses the
+    same own-thread bounded drain; on overrun we close our ends and return
+    whatever the partials hold - a timed-out result is worth more than a hung
+    app.
     """
-    try:
-        out, err = proc.communicate(timeout=grace)
-        return (out or "", err or "")
-    except subprocess.TimeoutExpired:
-        pass
-    for fh in (proc.stdout, proc.stderr):
-        try:
-            if fh:
-                fh.close()
-        except OSError:
-            pass
+    threads, boxes, streams = _drain_threads(proc)
+    endtime = time.monotonic() + grace
+    for t in threads:
+        t.join(timeout=max(0.0, endtime - time.monotonic()))
+    _close_streams(streams)
     try:
         proc.wait(timeout=grace)
     except (subprocess.TimeoutExpired, OSError):
         pass
-    return "", ""
+    try:
+        # direct child only: every LEGITIMATE writer is already tree-killed by
+        # the caller; what survives is an orphan grandchild (a parent whose
+        # tree link is gone) - a targeted kill here just fires blanks, while
+        # this one kills a stubborn direct child still parked behind its own
+        # helper and stops it outliving the drain.
+        proc.kill()
+    except OSError:
+        pass
+    out = boxes[0][0] if boxes else ""
+    err = boxes[1][0] if len(boxes) > 1 else ""
+    return out, err

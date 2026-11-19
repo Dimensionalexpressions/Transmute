@@ -14,7 +14,12 @@ import time
 
 import pytest
 
-from transmute.engines.base import drain_bounded, run_command
+from transmute.engines.base import (
+    _terminate_tree,
+    communicate_bounded,
+    drain_bounded,
+    run_command,
+)
 from transmute.probe.engines import _run_version
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32",
@@ -65,3 +70,37 @@ def test_probe_version_timeout_is_bounded_and_raises(tmp_path):
     left = subprocess.run(["pgrep", "-f", str(fake)],
                           capture_output=True, text=True)
     assert left.stdout.strip() == "", "tree survivor still running after probe timeout"
+
+
+def test_communicate_bounded_returns_output_normally():
+    """Happy path stays plain capture semantics."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "echo hello"], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = communicate_bounded(proc, 10.0)
+        assert out.strip() == "hello"
+        assert proc.returncode == 0
+    finally:
+        _terminate_tree(proc)
+
+
+def test_communicate_bounded_deadline_beats_pipe_holding_grandchild():
+    """THE Windows hang shape, portable: direct child EXITS while its own
+    children inherit and hold the write ends - CPython's communicate(timeout=)
+    reader-thread joins carry no deadline past that, so TimeoutExpired never
+    fires. Our deadline covers the wait for EOF, and the group dies after."""
+    proc = subprocess.Popen(["/bin/sh", "-c", "sleep 120 & sleep 120 & exit 0"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            communicate_bounded(proc, 2.0)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 12.0, f"deadline ignored ({elapsed:.1f}s) - CPython hole back"
+    finally:
+        _terminate_tree(proc)
+    time.sleep(0.5)
+    left = subprocess.run(["pgrep", "-f", "sleep 120"],
+                          capture_output=True, text=True)
+    assert left.stdout.strip() == "", "grandchild survived the group kill"

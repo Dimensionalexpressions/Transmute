@@ -14,15 +14,17 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QPalette, QPixmap
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QAbstractItemView,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QFrame, QDialog, QProgressBar, QPushButton, QRadioButton, QSlider,
     QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from . import theme
 from .controller import REMUX_CONTAINERS, ConverterController
 from ..watch import make_queue_callback
 
@@ -172,6 +174,7 @@ class MainWindow(QMainWindow):
         self.bench_note.connect(self._on_bench_note)
         self.bench_failed.connect(self._on_bench_failed)
         self.est_done.connect(self._on_est_done)
+        self._P = theme.apply(self)
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
         self.setAcceptDrops(True)
@@ -232,7 +235,7 @@ class MainWindow(QMainWindow):
         lv.addLayout(dst)
         self.lbl_hdr = QLabel("")
         self.lbl_hdr.setWordWrap(True)
-        self.lbl_hdr.setStyleSheet("color:#b3541e;")
+        self.lbl_hdr.setStyleSheet(f"color:{self._P['warn']};")
         lv.addWidget(self.lbl_hdr)
         prow = QHBoxLayout()
         self.btn_prev = QPushButton("Preview first frame")
@@ -298,17 +301,12 @@ class MainWindow(QMainWindow):
         # plain-language details for the chosen target (what you get, measured
         # speed per device on THIS machine). Colours follow the SYSTEM theme
         # (user feedback: hard-coded light box glared on the dark theme).
-        _dark = self.palette().color(QPalette.ColorRole.Window
-                                     ).lightness() < 128
+        p = self._P
         self.lbl_about = QLabel("")
         self.lbl_about.setWordWrap(True)
-        self.lbl_about.setStyleSheet(
-            "color:#a3ccc6;background:#26332f;" if _dark else
-            "color:#2f5f59;background:#eef6f5;")
-        self.lbl_about.setStyleSheet(self.lbl_about.styleSheet() +
-                                     "border-radius:6px;padding:6px 8px;")
-        self._warn_c = ("color:#e6b45a;" if _dark else "color:#b3541e;")
-        self._ok_c = ("color:#7cc47f;" if _dark else "color:#2e7d32;")
+        self.lbl_about.setStyleSheet(theme.chip(p, "info"))
+        self._warn_c = f"color:{p['warn']};"
+        self._ok_c = f"color:{p['accent']};"
         rv.addRow(self.lbl_about)
 
         # user directive: every number shown must come from THIS machine's
@@ -316,20 +314,10 @@ class MainWindow(QMainWindow):
         self.lbl_est = QLabel("")
         self.lbl_est.setWordWrap(True)
         self.lbl_est.hide()
-        if _dark:
-            self.lbl_est.setStyleSheet(
-                "color:#a3ccc6;background:#26332f;border-radius:6px;"
-                "padding:6px;")
-        else:
-            self.lbl_est.setStyleSheet(
-                "color:#2f5f59;background:#eef6f5;border-radius:6px;"
-                "padding:6px;")
         rv.addRow(self.lbl_est)
-        self._est_ok_style = self.lbl_est.styleSheet()
-        self._est_warn_style = (
-            "color:#d9a441;background:#3a3324;border-radius:6px;padding:6px;"
-            if _dark else
-            "color:#8a6d1a;background:#fdf6e3;border-radius:6px;padding:6px;")
+        self.lbl_est.setStyleSheet(theme.chip(p, "info"))
+        self._est_ok_style = theme.chip(p, "info")
+        self._est_warn_style = theme.chip(p, "warn")
         self.btn_bench = QPushButton("Re-benchmark this PC")
         self.btn_bench.setToolTip(
             "Test-encodes a 720p sample on every encoder found here, then "
@@ -357,8 +345,7 @@ class MainWindow(QMainWindow):
         self.bench_bar.setTextVisible(False)
         self.lbl_bench = QLabel("")
         self.lbl_bench.setWordWrap(True)
-        self.lbl_bench.setStyleSheet(
-            "color:" + ("#8f979e" if _dark else "#616161") + ";")
+        self.lbl_bench.setStyleSheet(f"color:{p['muted']};")
         rv.addRow(self.bench_bar)
         rv.addRow("", self.lbl_bench)
         self.bench_bar.hide()
@@ -490,17 +477,14 @@ class MainWindow(QMainWindow):
             lambda v: self._on_crf_choice(v, "spin"))
         self.lbl_crf_word = QLabel("")
         # which way is which (user feedback: an unlabeled slider is a guess)
-        muted = "#8b949e" if _dark else "#6e7781"
+        muted = p["muted"]
         self.lbl_crf_worse = QLabel("worse")
         self.lbl_crf_better = QLabel("better")
         for _lbl in (self.lbl_crf_worse, self.lbl_crf_better):
             _lbl.setStyleSheet(f"color:{muted};")
         self.lbl_size = QLabel("")
         self.lbl_size.setMinimumWidth(90)
-        if _dark:
-            self.lbl_size.setStyleSheet("color:#79b8ff;")
-        else:
-            self.lbl_size.setStyleSheet("color:#0a5bc0;")
+        self.lbl_size.setStyleSheet(f"color:{p['accent']};")
         qrow = QHBoxLayout()
         qrow.addWidget(self.lbl_crf_worse)
         qrow.addWidget(self.qslider, stretch=1)
@@ -581,9 +565,16 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(
             ["Source", "Target", "State", "Detail"])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         bv.addWidget(self.table, stretch=1)
         ctl = QHBoxLayout()
         self.btn_run = QPushButton("Run queue")
+        self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
         # P5: recoverable pause vs terminal cancel are DIFFERENT buttons —
         # never let one word mean both. In-flight jobs finish either way.

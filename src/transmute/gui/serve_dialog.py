@@ -45,7 +45,7 @@ class ServeDialog(QDialog):
             "anyone who has that link can use this computer, so share it like "
             "a Wi-Fi password. Stopping the app stops serving.")
         note.setWordWrap(True)
-        note.setStyleSheet("color:#8a8a94")
+        note.setObjectName("muted")  # colored by theme.qss (QLabel#muted)
         lay.addWidget(note)
         {"off": self.rad_off, "local": self.rad_local,
          "lan": self.rad_lan}.get(launcher.mode, self.rad_off).setChecked(True)

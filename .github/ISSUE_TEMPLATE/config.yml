@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Transmute on GitHub (this repository)
+    url: https://github.com/Dimensionalexpressions/transmute
+    about: Issues and releases.
+  - name: Transmute on our own git (mirror)
+    url: https://git.cekfam.com/kieros/transmute
+    about: Same code, same issues - file on either site, we read both.

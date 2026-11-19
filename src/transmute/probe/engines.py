@@ -115,7 +115,12 @@ KNOWN_ENGINES: dict[str, EngineSpec] = {
     "libreoffice": EngineSpec(
         "libreoffice", ("libreoffice", "soffice", "soffice.bin", "soffice.exe"),
         ("--version",), re.compile(r"LibreOffice ([0-9][0-9.]*)"), optional=True,
-        timeout_s=25.0),
+        timeout_s=25.0,
+        # P6 (found on the Windows bench): LibreOffice ships `soffice.COM`, a
+        # console-launcher shim that HANGS headless. shutil.which("soffice")
+        # resolves it first because PATHEXT tries .COM before .EXE - so on
+        # Windows never ask for the bare name; soffice.exe IS the binary.
+        extra_names=((), ("soffice.exe", "soffice.bin", "libreoffice"))),
     "pandoc": EngineSpec(
         "pandoc", ("pandoc",), ("--version",), re.compile(r"pandoc(?:\.exe)? ([0-9][0-9.]*)"),
         optional=True),

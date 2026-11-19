@@ -103,7 +103,11 @@ def test_queue_end_to_end_real_engine(tmp_path, fixtures, need_ffmpeg):
 def test_document_odt_to_pdf(tmp_path, fixtures):
     import shutil
     import subprocess
-    lo = shutil.which("libreoffice") or shutil.which("soffice")
+    # P6/Windows: LibreOffice's soffice.COM console shim hangs headless and
+    # PATHEXT prefers .COM over .EXE - ask for the exe-named binaries only.
+    lo = next((c for c in (shutil.which(n) for n in
+               ("libreoffice", "soffice.exe", "soffice.bin"))
+               if c and not c.lower().endswith(".com")), None)
     if not lo:
         pytest.skip("LibreOffice not installed")
     odt = tmp_path / "doc.odt"
@@ -111,7 +115,7 @@ def test_document_odt_to_pdf(tmp_path, fixtures):
     html.write_text("<html><body><h1>Transmute</h1><p>hello</p></body></html>")
     profile = tmp_path / "lo"
     subprocess.run([lo, "--headless", "--norestore",
-                    f"-env:UserInstallation=file://{profile}",
+                    f"-env:UserInstallation={profile.as_uri()}",
                     "--convert-to", "odt", "--outdir", str(tmp_path), str(html)],
                    check=True, timeout=180)
     assert odt.exists()

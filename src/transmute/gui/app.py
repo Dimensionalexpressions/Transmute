@@ -175,6 +175,12 @@ class MainWindow(QMainWindow):
         self.bench_failed.connect(self._on_bench_failed)
         self.est_done.connect(self._on_est_done)
         self._P = theme.apply(self)
+        # queue view state (A + auto-hide): finished rows are folded away by
+        # default, reachable behind "Show finished (N)"; rows THIS click just
+        # discarded leave the view at once even while finished are shown.
+        # Nothing is deleted - the journal keeps every row as history.
+        self._show_finished = False
+        self._just_discarded: set[str] = set()
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
         self.setAcceptDrops(True)
@@ -605,6 +611,18 @@ class MainWindow(QMainWindow):
             "interrupted, failed). Running and finished rows are untouched.\n"
             "Source files are never deleted.")
         self.btn_discard.clicked.connect(self._discard_selected)
+        # plain-text toggle, deliberately quieter than the action buttons:
+        # it reveals history, it does not act on it
+        self.btn_finished = QPushButton("")
+        self.btn_finished.setStyleSheet(
+            f"QPushButton {{ color:{self._P['muted']}; background:transparent;"
+            f" border:none; padding:2px 6px; }}"
+            f" QPushButton:hover {{ color:{self._P['text']}; }}")
+        self.btn_finished.setToolTip(
+            "Finished rows (done, kept, skipped, abandoned) stay in the\n"
+            "journal as history - this only shows or hides them here.")
+        self.btn_finished.clicked.connect(self._toggle_finished)
+        self.btn_finished.hide()
         self.bar = QProgressBar()
         self.bar.setRange(0, 0)
         self.bar.setVisible(False)
@@ -614,6 +632,7 @@ class MainWindow(QMainWindow):
         ctl.addWidget(self.btn_resume)
         ctl.addWidget(self.btn_cancel)
         ctl.addWidget(self.btn_discard)
+        ctl.addWidget(self.btn_finished)
         ctl.addWidget(self.bar)
         ctl.addWidget(self.lbl_status, stretch=1)
         bv.addLayout(ctl)
@@ -1517,11 +1536,23 @@ class MainWindow(QMainWindow):
         # pass (queue.run snapshots eligible once) - pump now, not in 500ms
         self._drain_watch()
 
+    # journal states that are FINAL (journal.TERMINAL, mirrored deliberately:
+    # the GUI filter must not drift if the runner's definition ever moves)
+    _FINISHED = ("replaced", "kept", "skipped", "abandoned")
+
     def refresh_queue(self) -> None:
         rows = self.ctrl.snapshot()
-        self.table.setRowCount(len(rows))
+        finished = [r for r in rows if r.state in self._FINISHED]
+        if self._show_finished:
+            # history on display - except rows this very click discarded:
+            # Discard means "out of my sight", auto-hidden even while
+            # finished are shown (they stay in the journal regardless)
+            shown = [r for r in rows if r.job_id not in self._just_discarded]
+        else:
+            shown = [r for r in rows if r.state not in self._FINISHED]
+        self.table.setRowCount(len(shown))
         done = sum(1 for r in rows if not r.live)
-        for i, r in enumerate(rows):
+        for i, r in enumerate(shown):
             src = Path(r.src).name
             it_src = QTableWidgetItem(src)
             # journal id rides as data: row actions (discard) address the job,
@@ -1538,8 +1569,23 @@ class MainWindow(QMainWindow):
             if r.reason and r.encoder:
                 item.setToolTip(f"encoder: {r.encoder}")
             self.table.setItem(i, 3, item)
-        self.lbl_status.setText(
-            f"{done}/{len(rows)} settled" if rows else "queue empty")
+        self.btn_finished.setText(
+            f"{'Hide' if self._show_finished else 'Show'} finished"
+            f" ({len(finished)})")
+        self.btn_finished.setVisible(bool(finished))
+        if not rows:
+            self.lbl_status.setText("queue empty")
+        elif not shown:
+            self.lbl_status.setText(
+                f"Nothing active — {len(finished)} finished row(s) hidden; "
+                f"they stay in the journal")
+        else:
+            self.lbl_status.setText(f"{done}/{len(rows)} settled")
+
+    def _toggle_finished(self) -> None:
+        self._show_finished = not self._show_finished
+        self._just_discarded.clear()  # an explicit view choice outranks the
+        self.refresh_queue()          # momentary auto-hide from a Discard
 
     # ------------------------------------------------- pause/resume/cancel
     def _pause(self) -> None:
@@ -1586,6 +1632,13 @@ class MainWindow(QMainWindow):
                 f"stay." if held else "Select row(s) to discard first.")
             return
         n = self.ctrl.queue.discard(ids)
+        # auto-hide ONLY rows the journal actually abandoned - a row the
+        # journal refused (worker owns it) must stay visible, even with
+        # finished on display, or the table would lie about it being gone
+        recs = getattr(self.ctrl.queue.journal, "records", {})
+        self._just_discarded.update(
+            j for j in ids
+            if recs.get(j) is not None and recs[j].state == "abandoned")
         self.refresh_queue()
         msg = f"Discarded {n} job(s) — source files untouched."
         if held:

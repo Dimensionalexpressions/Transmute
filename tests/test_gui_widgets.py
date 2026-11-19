@@ -584,10 +584,15 @@ class TestQueueControlsP5:
         rows = [(r.state, r.reason) for r in jq.journal.records.values()]
         assert all(s == "abandoned" and "cancelled by user" in rs
                    for s, rs in rows)
-        # the table actually shows it — cancel must never be silent
+        # cancel is never silent: the status says it, and the abandoned rows
+        # fold behind "Show finished" - one click away, never deleted
+        assert win.table.rowCount() == 0
+        assert "Cancelled 2" in win.lbl_status.text()
+        assert win.btn_finished.text() == "Show finished (2)"
+        assert win.btn_finished.isVisibleTo(win)
+        win.btn_finished.click()                     # reveal the history
         assert win.table.rowCount() == 2
         assert all(win.table.item(i, 2).text() == "abandoned" for i in range(2))
-        assert "Cancelled 2" in win.lbl_status.text()
 
     def test_discard_selected_abandons_only_the_selection(self, qwin):
         win, jq = qwin
@@ -599,11 +604,46 @@ class TestQueueControlsP5:
         assert recs[ids[0]].state == "abandoned"
         assert recs[ids[0]].reason == "discarded by user"
         assert recs[ids[1]].state == "queued"       # sibling untouched
-        # the table shows the truth, and the source file is NOT deleted
-        assert win.table.item(0, 2).text() == "abandoned"
-        assert win.table.item(1, 2).text() == "queued"
+        # the discarded row leaves the view at once (auto-hide), the live
+        # sibling stays, the source file is NOT deleted...
+        assert win.table.rowCount() == 1
+        assert win.table.item(0, 2).text() == "queued"
         assert "Discarded 1 job(s) — source files untouched." in \
             win.lbl_status.text()
+        # ...and the history is one click away, never deleted
+        win.btn_finished.click()
+        assert win.table.rowCount() == 2
+        assert sorted(win.table.item(i, 2).text() for i in range(2)) == \
+            ["abandoned", "queued"]
+
+    def test_discard_autohides_even_while_finished_are_shown(self, qwin):
+        # "A + auto-hide": even with history on display, the row a Discard
+        # click abandons leaves the table NOW; older finished rows stay.
+        win, jq = qwin
+        ids = list(jq.journal.records)
+        first = jq.journal.records[ids[0]]
+        jq.journal.transition(first, "abandoned", reason="old history")
+        win.refresh_queue()                          # folds the old row away
+        assert win.btn_finished.text() == "Show finished (1)"
+        win.btn_finished.click()                     # show finished
+        assert win.table.rowCount() == 2
+        rows_by_id = {win.table.item(i, 0).data(Qt.ItemDataRole.UserRole): i
+                      for i in range(2)}
+        win.table.selectRow(rows_by_id[ids[1]])
+        win.btn_discard.click()
+        assert jq.journal.records[ids[1]].state == "abandoned"
+        assert win.table.rowCount() == 1             # just-discarded vanished…
+        assert win.table.item(0, 2).text() == "abandoned"
+        assert win.table.item(0, 0).data(Qt.ItemDataRole.UserRole) == ids[0]
+        # old history stays visible
+        # an explicit view choice outranks the auto-hide: hide, then show
+        # again, and every finished row — including the just-discarded one —
+        # is back (the journal never lost it)
+        win.btn_finished.click()
+        assert win.table.rowCount() == 0
+        assert win.btn_finished.text() == "Show finished (2)"
+        win.btn_finished.click()
+        assert win.table.rowCount() == 2
 
     def test_discard_leaves_in_flight_rows_alone(self, qwin):
         win, jq = qwin
@@ -622,6 +662,35 @@ class TestQueueControlsP5:
         win.btn_discard.click()
         assert all(r.state == "queued" for r in jq.journal.records.values())
         assert "Select row(s) to discard" in win.lbl_status.text()
+
+    def test_finished_rows_stay_folded_away_across_restarts(self, qapp,
+                                                             tmp_path, fixtures):
+        # the reported scene: yesterday's abandoned row must NOT greet the
+        # user as live clutter at next boot - journal keeps it, view folds
+        # it behind "Show finished" until asked
+        from transmute.gui.app import MainWindow
+        from transmute.jsonl import JsonlWriter
+        from transmute.runner import JobQueue, Journal
+        from test_gui_controller import _report
+        jq = JobQueue(journal=Journal(tmp_path / "journal.jsonl"),
+                      events=JsonlWriter(tmp_path / "events.jsonl"),
+                      logs_root=tmp_path / "captures",
+                      engine_get=lambda cat: None)
+        jq.add(fixtures["jpg"], tmp_path / "drop.webp", category="image")
+        jq.cancel_all()                              # abandoned + persisted
+        ctrl = ConverterController(report_provider=_report, queue=jq)
+        ctrl._report = _report()
+        win = MainWindow(controller=ctrl)            # boots like a new session
+        try:
+            assert win.table.rowCount() == 0         # no zombie clutter
+            assert win.btn_finished.text() == "Show finished (1)"
+            assert "finished row(s) hidden" in win.lbl_status.text()
+            win.btn_finished.click()
+            assert win.table.rowCount() == 1
+            assert win.table.item(0, 2).text() == "abandoned"
+            assert "cancelled by user" in win.table.item(0, 3).text()
+        finally:
+            win.close()
 
 
 class TestProbeCaveatsVisible:

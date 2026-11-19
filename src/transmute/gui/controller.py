@@ -512,6 +512,15 @@ class ConverterController:
     # actually has, named from what it actually reports. A device that cannot
     # encode stays VISIBLE with the probe's own measured reason (doctrine:
     # no hardware assumptions - neither absence nor capability).
+    def gpu_decode_status(self) -> dict[str, Any]:
+        """This machine's GPU-DECODE verdict from the probe's executed trial
+        ({} when no report exists yet). Decoding is offloaded to the GPU
+        only where this says available - the machine decides, not us."""
+        try:
+            return dict(getattr(self.report(), "gpu_decode", None) or {})
+        except Exception:  # noqa: BLE001 - a missing verdict stays silent
+            return {}
+
     def devices(self) -> list[dict[str, Any]]:
         """[{id, kind, name, backends, works, why}] - CPU first, then one
         entry per GPU (identical cards share one entry). Rebuilt whenever a

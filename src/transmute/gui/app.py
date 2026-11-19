@@ -373,6 +373,13 @@ class MainWindow(QMainWindow):
         self._load_devices()
         self.device_box.currentIndexChanged.connect(self._on_device_pick)
         mform.addRow("CPU / GPU", self.device_box)
+        # Decode honesty line: the picker above speaks about ENCODING; video
+        # DECODING also runs on the GPU only when the probe proved this
+        # machine really decodes there. One short truth, no new knob.
+        self.lbl_dec = QLabel("")
+        self.lbl_dec.setWordWrap(True)
+        mform.addRow(self.lbl_dec)
+        self.lbl_dec.hide()
         rv.addRow(more)
         qlrow = QHBoxLayout()
         self.rad_crf = QRadioButton("Quality (CRF)")
@@ -677,6 +684,33 @@ class MainWindow(QMainWindow):
         i = self.device_box.findData(self.ctrl.device())
         self.device_box.setCurrentIndex(i if i >= 0 else 0)
         self.device_box.blockSignals(False)
+        self._update_decode_line()
+
+    def _update_decode_line(self) -> None:
+        """One honest line about the DECODE path, from the probe's own trial:
+        on means ffmpeg on this machine decoded our GPU-frame-checked H.264
+        sample on the GPU; off carries its reason. Silent when nothing was
+        attempted (GPU held out at launch, no ffmpeg) - nothing to claim."""
+        lbl = getattr(self, "lbl_dec", None)
+        if lbl is None:  # called during construction, before the row exists
+            return
+        gd = self.ctrl.gpu_decode_status()
+        pretty = {"cuda": "NVIDIA GPU (NVDEC)",
+                  "vaapi": "GPU via VA-API"}.get(gd.get("api", ""),
+                                                 gd.get("api", ""))
+        if gd.get("available"):
+            lbl.setText(f"Video decoding: on the GPU ({pretty})")
+            lbl.setStyleSheet(self._ok_c)
+            lbl.show()
+        elif gd.get("attempted"):
+            why = (gd.get("reason") or "").strip() or "this GPU declined to decode"
+            if len(why) > 160:
+                why = why[:157] + "..."
+            lbl.setText(f"Video decoding: on the CPU - {why}")
+            lbl.setStyleSheet(self._warn_c)
+            lbl.show()
+        else:
+            lbl.hide()
 
     def _on_device_pick(self, _idx: int) -> None:
         dev = self.device_box.currentData() or "auto"

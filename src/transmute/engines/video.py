@@ -86,6 +86,27 @@ def _hw_upload_needed(cap: EncoderCapability | None) -> tuple[str, str] | None:
         return None
     return _HW_UPLOAD_APIS.get(cap.backend)
 
+
+def _hw_decode_pre(gpu_decode: dict, cap: EncoderCapability | None,
+                   tone: bool) -> list[str]:
+    """Ladder rung 1: -hwaccel <api> in front of -i, ONLY when the probe's
+    executed trial proved this machine really decodes on its GPU.
+
+    Deliberately narrow: a GPU encoder feeds its own decoder through the
+    driver, so offload applies to CPU encoders only; the tone-map chain's
+    CPU path stays deterministic (frames must reach zscale as plain sw
+    frames); TRANSMUTE_DISABLE_GPU stays off; a missing/older report just
+    says nothing, which means plain CPU decode like always. Worst case of
+    an honest flag is today's behaviour - ffmpeg falling back to CPU."""
+    if cap is None or tone or gpu_force_disabled():
+        return []
+    if cap.backend != "cpu":
+        return []
+    if (isinstance(gpu_decode, dict) and gpu_decode.get("available")
+            and gpu_decode.get("api")):
+        return ["-hwaccel", str(gpu_decode["api"])]
+    return []
+
 DEFAULT_CRF = {"av1": 30, "vp9": 33, "h264": 23, "hevc": 28}
 
 # Usable quality range per encoder - (low, high, default), low = best.
@@ -357,6 +378,17 @@ class VideoEngine:
             return EngineResult("failed", reason=hw_why,
                                 encoder=cap.name if cap else "copy",
                                 log_path=log_path)
+        # GPU decode offload (probe-verified ladder rung): hand the decode to
+        # the GPU only when this machine has proven it decodes there, and
+        # only for CPU encoders - hardware encoders drive their own decoder
+        # inside the driver already.
+        dec_pre: list[str] = []
+        if cap is not None and cap.backend == "cpu" and not tone:
+            try:
+                gd = getattr(self.prober.report(), "gpu_decode", None) or {}
+            except Exception:  # noqa: BLE001 - reporting must not kill planning
+                gd = {}
+            dec_pre = _hw_decode_pre(gd, cap, tone)
 
         # ------------------------------------------------ audio policy (copy/replace)
         # acodecs/ok_audio/bad_audio were computed above (they gate the F20 skip).
@@ -396,6 +428,7 @@ class VideoEngine:
         # ------------------------------------------------ quality: CRF or size target
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
                           *hw_pre,
+                          *dec_pre,
                           "-i", src,
                           "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
                           "-c:v", cap.name if cap else "copy",
@@ -608,6 +641,15 @@ class VideoEngine:
             return none
         if hw_why:
             return {**none, "note": hw_why}
+        # the sample must measure the SAME decode path the real job uses,
+        # or every speed number would describe a command we never run
+        dec_pre: list[str] = []
+        if cap.backend == "cpu":
+            try:
+                gd = getattr(self.prober.report(), "gpu_decode", None) or {}
+            except Exception:  # noqa: BLE001 - reporting must not kill planning
+                gd = {}
+            dec_pre = _hw_decode_pre(gd, cap, False)
         astreams = [st for st in self.probe.audio_streams(src)
                     if (st.get("codec_name") or "").lower()]
         if audio_mode == "replace" and astreams:
@@ -627,6 +669,7 @@ class VideoEngine:
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel",
                           "error", "-stats",
                           *hw_pre,
+                          *dec_pre,
                           "-ss", f"{start:.2f}", "-i", src,
                           "-t", f"{sec:.2f}", "-map", "0:v:0", "-an",
                           "-c:v", cap.name, "-f", "matroska"]

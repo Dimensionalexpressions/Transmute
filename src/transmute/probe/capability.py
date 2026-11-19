@@ -38,7 +38,9 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 9  # 8 -> 9: benchmark sample raised to 1280x720 (numbers must
+SCHEMA_VERSION = 10  # 9 -> 10: gpu_decode field added (GPU decode ladder rung);
+# old caches lack it and must re-probe, not fake "no decode".
+# 8 -> 9: benchmark sample raised to 1280x720 (numbers must
 # reflect THIS machine under realistic load, not a tiny clip that flatters CPUs);
 # a timed-out trial now means "works, too slow to measure", never "unavailable".
 SCHEMA_VERSION_PREV = 8  # 7 -> 8: libx264-family trial used crf 55, which is
@@ -180,6 +182,10 @@ class CapabilityReport:
     pdf_backends: dict[str, bool]
     caveats: list[str]
     matrix: list[MatrixRow]
+    # {"attempted": bool, "available": bool, "api": str, "reason": str} -
+    # GPU-DECODE verdict from an executed trial (ladder rung 1); {} when the
+    # report predates the field (fresh probe always fills it)
+    gpu_decode: dict[str, Any] = field(default_factory=dict)
 
     # -- serialization -----------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -196,6 +202,7 @@ class CapabilityReport:
             filters=d["filters"], gpu_nodes=d["gpu_nodes"],
             image_backends=d["image_backends"], pdf_backends=d["pdf_backends"],
             caveats=d["caveats"], matrix=[MatrixRow(**r) for r in d["matrix"]],
+            gpu_decode=d.get("gpu_decode") or {},
         )
 
     # -- queries ------------------------------------------------------------
@@ -476,6 +483,79 @@ def _probe_ffmpeg_filters(ffmpeg: Path) -> dict[str, bool]:
     return have
 
 
+# ---------------------------------------------------------------- decode probe
+# Ladder rung 1 (GPU decode offload): the engine adds -hwaccel ONLY when this
+# trial proves the machine really decodes H.264 on its GPU. cuda is tried
+# first where NVIDIA nodes exist (NVDEC); VA-API covers AMD/Intel render
+# nodes. Windows/other APIs (D3D11VA...) are a deliberate later rung.
+_DECODE_APIS: tuple[tuple[str, str], ...] = (("cuda", "nvidia"),
+                                             ("vaapi", "dri_render"))
+
+
+def _decoded_pix_fmt(text: str) -> str:
+    """Pixel format of the DECODED stream from ffmpeg's output stream line
+    ("Video: wrapped_avframe, nv12(...)"). Empty when the line is absent."""
+    m = re.search(r"Video:\s+\S+,\s*([a-z0-9_]+)[,(]", text or "")
+    return m.group(1) if m else ""
+
+
+def _probe_gpu_decode(ffmpeg: Path) -> dict[str, Any]:
+    """{"attempted","available","api","reason"} - executed-trial truth.
+
+    Belief rule: this ffmpeg names the decoder "h264 (native)" even while
+    NVDEC/VAAPI do the work (Lavc63 routes hwaccel under the native codec),
+    so the stream line lies. The decoded FRAME FORMAT cannot: GPU decode
+    hands back GPU frames (nv12/vaapi...), CPU decode hands back yuv420p.
+    The trial is only believed when the format CHANGES from the plain-CPU
+    baseline run - a driver that declines keeps the baseline format and
+    gets honestly reported as "no GPU decode"."""
+    out_dir = tempfile.mkdtemp(prefix="transmute-dec-")
+    sample = Path(out_dir) / "sample.mp4"
+    try:
+        made = run_command(
+            [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=blue:s=640x480:r=25:d=1",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             "-preset", "ultrafast", sample], timeout_s=60, gpu=True)
+        if not (made.ok and sample.is_file()):
+            return {"attempted": False, "available": False, "api": "",
+                    "reason": "could not make the H.264 decode test sample "
+                              "(software encoder unavailable?)"}
+        base = run_command([ffmpeg, "-hide_banner", "-nostdin",
+                            "-i", sample, "-f", "null", "-"],
+                           timeout_s=60, gpu=True)
+        base_fmt = _decoded_pix_fmt(base.stderr_text)
+        if not (base.ok and base_fmt):
+            return {"attempted": False, "available": False, "api": "",
+                    "reason": "CPU decode baseline run failed - nothing to "
+                              "compare a GPU trial against"}
+        notes: list[str] = []
+        for api, node in _DECODE_APIS:
+            if node == "nvidia" and not _has_nvidia_nodes():
+                continue
+            if node == "dri_render" and not _has_dri_render_node():
+                continue
+            res = run_command([ffmpeg, "-hide_banner", "-nostdin",
+                               "-hwaccel", api, "-i", sample,
+                               "-f", "null", "-"],
+                              timeout_s=60, gpu=True)
+            fmt = _decoded_pix_fmt(res.stderr_text)
+            if res.ok and fmt and fmt != base_fmt:
+                return {"attempted": True, "available": True, "api": api,
+                        "reason": ""}
+            if res.ok:
+                notes.append(f"{api}: ffmpeg accepted the flag but still "
+                             f"decoded to CPU frames ({fmt or 'no stream line'})")
+            else:
+                tail = _stderr_tail(res.stderr_text)
+                notes.append(f"{api}: {tail or f'exit {res.returncode}'}")
+        return {"attempted": True, "available": False, "api": "",
+                "reason": "; ".join(notes) or "no GPU decode device nodes here"}
+    finally:
+        import shutil
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
 def _probe_key(ffmpeg_path: Path | None, ffprobe_path: Path | None) -> str:
     h = hashlib.sha256()
     h.update(_PROBE_SALT.encode())
@@ -600,6 +680,24 @@ class CapabilityProber:
         if disable_gpu:
             caveats.append("GPU probing disabled by TRANSMUTE_DISABLE_GPU "
                            "(used to validate the GPU-less code path).")
+        # GPU decode rung: executed trial, recorded like everything else -
+        # the engine will not add -hwaccel before this says it truly decodes.
+        if ffmpeg is None:
+            gpu_decode: dict[str, Any] = {
+                "attempted": False, "available": False, "api": "",
+                "reason": "no ffmpeg on this machine"}
+        elif disable_gpu:
+            gpu_decode = {"attempted": False, "available": False, "api": "",
+                          "reason": "GPU disabled (TRANSMUTE_DISABLE_GPU)"}
+        elif self._cancel is not None and self._cancel():
+            raise ProbeCancelled("benchmark cancelled")
+        else:
+            self._note(1, 1, "trying GPU video decode on this machine")
+            gpu_decode = _probe_gpu_decode(ffmpeg)
+        if gpu_decode.get("attempted") and not gpu_decode.get("available"):
+            caveats.append("GPU decode trial: this machine's GPU would not "
+                           "decode H.264 for us - conversions decode on CPU "
+                           f"({gpu_decode.get('reason', '')[:120]})")
         if not gpu_nodes["dri_render"] and not gpu_nodes["nvidia"] and not disable_gpu \
                 and sys.platform != "win32":
             caveats.append("No GPU device nodes on this machine: hardware encode rows "
@@ -625,7 +723,7 @@ class CapabilityProber:
                      for n, i in engines.items()},
             encoders=caps, filters=filters, gpu_nodes=gpu_nodes,
             image_backends=image_backends, pdf_backends={k: bool(v) for k, v in pdf_backends.items()},
-            caveats=caveats, matrix=[],
+            caveats=caveats, matrix=[], gpu_decode=gpu_decode,
         )
         rep.matrix = build_matrix(rep)
         return rep

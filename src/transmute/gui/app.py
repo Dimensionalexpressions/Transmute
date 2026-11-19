@@ -286,7 +286,10 @@ class MainWindow(QMainWindow):
         sh = QHBoxLayout(sbox)
         self.lbl_serve = QLabel("not serving")
         self.lbl_serve.setWordWrap(True)
-        self.btn_serve = QPushButton("Serving…")
+        self.btn_serve = QPushButton("Set up...")
+        self.btn_serve.setToolTip(
+            "Choose who may convert files here: nobody, this computer only,\n"
+            "or your home network (with a password you pick).")
         self.btn_serve.clicked.connect(self._serve_dialog)
         sh.addWidget(self.lbl_serve, stretch=1)
         sh.addWidget(self.btn_serve)

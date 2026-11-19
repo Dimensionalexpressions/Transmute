@@ -92,3 +92,26 @@ App code: Apache-2.0 (see `LICENSE`). Engines stay external and on your own
 system's packaging; this repository bundles **no** codec or engine binaries.
 `LICENSES.md` (added at P8 packaging) will be compiled from the actual
 fetched license texts of whatever we choose to bundle — never from memory.
+
+<!-- report-a-bug:start -->
+## Report a bug
+
+Something broken, or something that should work differently? Open an issue on this repository's
+**Issues** page — the form asks a few short questions, and one command fills in the technical part
+for you (versions, engines it found, nothing personal unless you ask for it):
+
+Linux/macOS:
+
+```
+./scripts/bugreport.sh --command "the exact command you ran"
+```
+
+Windows (PowerShell):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bugreport.ps1 -Command "the exact command you ran"
+```
+
+What is asked, and why, is written out in [REPORTING.md](REPORTING.md).
+
+<!-- report-a-bug:end -->

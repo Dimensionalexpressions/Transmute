@@ -1,0 +1,7 @@
+.git
+.venv
+.gui-live
+__pycache__
+*.pyc
+.pytest_cache
+assets

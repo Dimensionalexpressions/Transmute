@@ -73,9 +73,15 @@ class Journal:
             job_id = rec.get("job_id")
             if not job_id or state not in STATES:
                 continue
-            prev = self.records.get(job_id)
-            if state == "running" and prev is None:
-                # record from a dead process: crash/restart marker
+            if state in ("running", "verifying"):
+                # No live encode can exist in a journal read at startup: the
+                # process that wrote it died (crash, kill -9, power loss).
+                # Recover it as interrupted whether or not an earlier queued
+                # line preceded it - "prev is None" is NOT the signature; a
+                # normal job always has queued->running lines, so checking
+                # only the orphan case left every real crashed job stuck in
+                # "running" forever (resumable() skips it, GUI could neither
+                # resume nor discard it).
                 state = "interrupted"
             self.records[job_id] = JournalRecord(
                 job_id=job_id, src=str(rec.get("src", "")), dst=str(rec.get("dst", "")),

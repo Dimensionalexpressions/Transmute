@@ -218,6 +218,19 @@ class DocumentEngine:
         magic = _OUT_MAGIC.get(target)
         if magic and not path.read_bytes()[:8].startswith(magic):
             return f"output is not a valid {target.upper()} file"
+        mags = tuple(m for m in (magic if isinstance(magic, tuple) else (magic,))
+                     if m)  # txt etc.: magic None or a prefix set, guard both
+        if any(m.startswith(b"PK") for m in mags):
+            # A zip container passing the magic sniff can still be a
+            # truncated half-write: open it and test every entry, or a
+            # corrupt file is reported as a successful conversion.
+            import zipfile
+            try:
+                with zipfile.ZipFile(path) as zf:
+                    if zf.testzip() is not None:
+                        return f"{target.upper()} archive is corrupt"
+            except (zipfile.BadZipFile, OSError):
+                return f"output is not a valid {target.upper()} file"
         return None
 
     def _pandoc_export(self, src: Path, dst: Path, target: str,
@@ -236,13 +249,19 @@ class DocumentEngine:
         cmd += ["-o", str(dst)]
         res = run_command(cmd, timeout_s=timeout_s, log_path=log_path,
                           governor=governor)
-        bad = self._invalid_output(dst, target)
-        if bad and res.timed_out:
+        # Exit status is authority: a killed or failed pandoc can leave an
+        # output file that sniffs valid (truncated .txt passes any header
+        # check), and declaring success from the sniff alone would certify
+        # garbage - verified_by_engine then skips the queue's own verify.
+        if res.timed_out:
             bad = "timed out"
+        elif not res.ok:
+            bad = _tail(res.stderr_text) or f"exit {res.returncode}"
+        else:
+            bad = self._invalid_output(dst, target)
         if bad:
             dst.unlink(missing_ok=True)
-            detail = bad if bad == "timed out" else f"{bad} ({_tail(res.stderr_text)})"
-            return EngineResult("failed", reason=f"pandoc: {detail}",
+            return EngineResult("failed", reason=f"pandoc: {bad}",
                                 seconds=time.monotonic() - t0, log_path=log_path)
         return EngineResult("converted", output=dst, encoder="pandoc",
                             seconds=time.monotonic() - t0, log_path=log_path,
@@ -264,7 +283,15 @@ class DocumentEngine:
                               timeout_s=timeout_s, log_path=log_path,
                               governor=governor)
             produced = next(iter(sorted(outdir.glob("*.*"))), None)
-            if produced is not None:
+            if produced is not None and res.timed_out:
+                # LibreOffice can be killed while writing its output: a
+                # half-written file that sniffs valid is still not a
+                # conversion (exit code is unreliable for LO, so timeout -
+                # not exit status - is what we refuse on; a finished LO run
+                # that exited nonzero but produced a sound container per
+                # _invalid_output, zip entries included, stays accepted)
+                bad = "timed out mid-write: a half-written file is not a conversion"
+            elif produced is not None:
                 bad = self._invalid_output(produced, target)
             else:
                 bad = ("timed out" if res.timed_out

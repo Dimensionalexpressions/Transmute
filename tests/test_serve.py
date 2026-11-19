@@ -414,10 +414,83 @@ def test_batch_part_success_names_every_refusal(tmp_path):
         assert "unknown target" in refused.pop("ghost.png")   # machine's words
         assert "upload not found" in refused.pop("missing123")
         assert refused == {}                              # nothing else lied
+        # every refusal carries the upload_id that was sent: names are not
+        # unique, so the page can only attribute "not queued" by the id
+        assert all(r.get("upload_id") for r in res["refused"])
+        got_ids = {r["upload_id"] for r in res["refused"]}
+        assert {up["upload_id"], "missing123"} == got_ids
         for job in res["jobs"]:
             srv.wait_done(job)
             c, blob = srv.get(f"/download/{job}")
             assert c == 200 and blob[:4] == b"RIFF"       # both really made
         assert srv.post_json("/api/convert_batch", {"items": []})[0] == 400
+    finally:
+        srv.close()
+
+
+def test_worker_loop_reports_queue_error_and_survives(tmp_path):
+    """A runner error must kill THAT burst, never the worker thread: the
+    fix appends worker_error to the event log and keeps serving - without
+    it, one escaping exception silently stops every later upload from
+    converting, with nothing the user could ever see."""
+    from types import SimpleNamespace
+    from transmute.jsonl import JsonlWriter
+    from transmute.serve.core import ServeState as _SS
+
+    core = _SS.__new__(_SS)                          # loop deps only
+    core._stop, core._wake = threading.Event(), threading.Event()
+    ev = JsonlWriter(tmp_path / "events.jsonl")
+    calls = {"n": 0}
+
+    def run(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("engine exploded")
+        return SimpleNamespace(processed=0)
+
+    core.queue = SimpleNamespace(run=run, events=ev, stop=lambda: None)
+    core._wake.set()
+    th = threading.Thread(target=core._worker_loop, daemon=True)
+    th.start()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            lines = [json.loads(l) for l in
+                     (tmp_path / "events.jsonl").read_text().splitlines()]
+        except FileNotFoundError:                # thread has not written yet
+            lines = []
+        if any(l.get("event") == "worker_error" for l in lines):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("worker_error never reached the event log")
+    # thread survived the burst: wake again, second call returns cleanly
+    core._wake.set()
+    time.sleep(0.2)
+    assert th.is_alive()
+    core._stop.set()
+    core._wake.set()
+    th.join(5)
+    assert not th.is_alive()
+
+
+def test_duplicate_names_refusal_attaches_to_the_right_upload(tmp_path):
+    """Two uploads may share a display name (safe_name never dedups). The
+    refusal must identify WHICH upload was refused - the page used to map
+    by name and painted 'not queued' on the innocent twin."""
+    srv = _Server(tmp_path / "dupname")
+    try:
+        c1, u1 = srv.upload("IMG.jpg", _png())
+        c2, u2 = srv.upload("IMG.jpg", _png())
+        assert u1["upload_id"] != u2["upload_id"]
+        code, res = srv.post_json("/api/convert_batch", {"items": [
+            {"upload_id": u1["upload_id"], "target": "webp"},
+            {"upload_id": u2["upload_id"], "target": "no-such-target"}]})
+        assert code == 200 and len(res["jobs"]) == 1
+        refused = res["refused"]
+        assert len(refused) == 1
+        assert refused[0]["upload_id"] == u2["upload_id"]   # the guilty twin
+        for job in res["jobs"]:
+            srv.wait_done(job)
     finally:
         srv.close()

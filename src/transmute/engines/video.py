@@ -353,7 +353,10 @@ class VideoEngine:
         # F20: already in the target codec -> skip, don't re-compress blindly.
         same_video = src_codec == target_codec and encoder is None and crf is None \
             and size_mb is None and not tonemap
-        if same_video and not bad_audio:
+        if same_video and not bad_audio and audio != "replace":
+            # audio='replace' is real pending work: the job must run, even
+            # when the video codec already matches - skipping would silently
+            # drop the user's audio request.
             return EngineResult("skipped", reason=f"already {target_codec}-encoded")
 
         # ------------------------------------------------ F15 tone-map (opt-in)
@@ -685,8 +688,6 @@ class VideoEngine:
                             for st in astreams)
         sec = min(2.0, max(0.5, dur / 4.0))
         start = max(0.0, dur / 3.0)
-        td = tempfile.mkdtemp(prefix="transmute-est-")
-        out = Path(td) / "s.mkv"
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel",
                           "error", "-stats",
                           *hw_pre,
@@ -712,6 +713,10 @@ class VideoEngine:
         if size_mb is not None:  # rate-control mode: sample at the job bitrate
             v_bps = max(int(size_mb * 8e6 / dur) - audio_bps, 100_000)
             cmd += ["-b:v", str(v_bps)]
+        # create the sample dir AFTER the quality refusal: the refusal
+        # returns before the try/finally below and would leak this mkdtemp
+        td = tempfile.mkdtemp(prefix="transmute-est-")
+        out = Path(td) / "s.mkv"
         cmd += ["-y", str(out)]
         try:
             t0 = time.monotonic()
@@ -740,8 +745,12 @@ class VideoEngine:
         if v:
             num, _, den = str(v.get("r_frame_rate", "")).partition("/")
             try:
-                src_fps = float(num) / float(den or 1)
-            except ValueError:
+                # "0/0" (and "-0/0", "0.000/0") pass float() but die on the
+                # division: a broken header must degrade the speed estimate,
+                # not raise through the GUI's estimate thread
+                d = float(den or 1)
+                src_fps = float(num) / d if d else 0.0
+            except (ValueError, ZeroDivisionError):
                 src_fps = 0.0
         # ffmpeg's stats "fps" charges process startup + sample seek to the
         # encode - on a 2 s sample that flatters nothing but the error bar.
@@ -753,7 +762,9 @@ class VideoEngine:
             est_s = (wall_work / frames) * frames_total
         else:
             est_s = wall * (dur / sec)
-        size = out_bytes * (dur / sec) + audio_bps * dur
+        # audio_bps is BITS/second, the sample's out_bytes are BYTES: mixing
+        # them raw inflated every CRF-mode estimate by 8x the audio size
+        size = out_bytes * (dur / sec) + audio_bps * dur / 8
         if size_mb is not None:
             # hit-your-target is the claim; the sample above proved the rate
             # control runs at usable speed on this machine

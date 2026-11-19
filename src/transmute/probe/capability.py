@@ -556,6 +556,16 @@ def _probe_gpu_decode(ffmpeg: Path) -> dict[str, Any]:
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
+def _device_token() -> str:
+    """Count of GPU device nodes, as a cache-key ingredient. Cheap stat
+    globbing, no subprocess; on platforms without /dev it is a constant
+    string (the probe's own device enumeration is what varies there)."""
+    import glob as _glob
+    return "".join(f"{pat}={len(_glob.glob(pat))};"
+                   for pat in ("/dev/dri/renderD*", "/dev/dri/card*",
+                               "/dev/nvidia*"))
+
+
 def _probe_key(ffmpeg_path: Path | None, ffprobe_path: Path | None) -> str:
     h = hashlib.sha256()
     h.update(_PROBE_SALT.encode())
@@ -570,6 +580,10 @@ def _probe_key(ffmpeg_path: Path | None, ffprobe_path: Path | None) -> str:
         except OSError:
             h.update(f"{p}?;".encode())
     h.update(("gpu=off;" if gpu_force_disabled() else "gpu=on;").encode())
+    # GPU device PRESENCE belongs to the machine identity too: a probe that
+    # ran with the GPU powered off cached its "no GPU device node" verdict
+    # indefinitely - same binaries, same gpu=on lane, no way back.
+    h.update(_device_token().encode())
     try:  # include Pillow build identity: WebP/AVIF support can change on reinstall
         import PIL
         h.update(f"pil{PIL.__version__};".encode())
@@ -792,8 +806,14 @@ def build_matrix(rep: CapabilityReport) -> list[MatrixRow]:
                           recommended=True,
                           note="" if feat.get("webp") else "Pillow lacks WebP support"))
     rows.append(MatrixRow("image", "webp(animated)", "Pillow/WebP",
-                          available=bool(feat.get("webp_anim") or feat.get("gif")),
-                          note="animated GIF -> animated WebP keeps frames/loop"))
+                          # animated GIF->WebP is saved by the same WebP
+                          # backend the engine gates on (_supports("webp")):
+                          # inferring it from GIF support showed this row
+                          # AVAILABLE on builds whose engine then refused
+                          available=bool(feat.get("webp")),
+                          note="animated GIF -> animated WebP keeps frames/loop"
+                               if feat.get("webp") else
+                               "Pillow lacks WebP support"))
     rows.append(MatrixRow("image", "avif", "Pillow/AVIF", available=bool(feat.get("avif")),
                           recommended=bool(feat.get("avif")),
                           note="shown only if the local Pillow build supports AVIF"))

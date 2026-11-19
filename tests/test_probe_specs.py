@@ -83,3 +83,43 @@ class TestHwTrialCommands:
         from transmute.probe import capability as c
         monkeypatch.setattr(c, "_run_trial", lambda cmd: (False, None, f"fail {cmd[0]}"))
         assert c._run_trials([["a"], ["b"]]) == (False, None, "fail b")
+
+
+def test_webp_animated_row_follows_the_engine_gate(tmp_path):
+    """The engine refuses animated GIF->WebP unless Pillow's WebP backend
+    works (_supports("webp")); the row used to infer it from GIF support
+    and showed AVAILABLE exactly where the engine would then refuse."""
+    from types import SimpleNamespace
+    from transmute.probe.capability import build_matrix
+
+    def rows_for(feat):
+        rep = SimpleNamespace(engines={}, encoders=[], pdf_backends={},
+                              image_backends={"features": feat})
+        return build_matrix(rep)
+
+    rows = rows_for({"webp": False, "gif": True, "avif": False, "png": True})
+    anim = [r for r in rows if r.target == "webp(animated)"]
+    assert anim and anim[0].available is False
+    assert "WebP" in anim[0].note
+    rows = rows_for({"webp": True, "gif": False, "avif": False, "png": True})
+    anim = [r for r in rows if r.target == "webp(animated)"]
+    assert anim and anim[0].available is True
+
+
+def test_probe_key_moves_when_gpu_devices_change(tmp_path, monkeypatch):
+    """A machine's no-GPU verdict must not outlive a hardware change: the
+    cached probe key now contains the device count, so plugging in (or
+    failing) a render node invalidates the cache."""
+    from transmute.probe import capability as C
+    import glob as glob_mod
+
+    state = {"n": 1}
+
+    def fake_glob(pat):
+        return ["x"] * state["n"] if "*" in pat else []
+
+    monkeypatch.setattr(glob_mod, "glob", fake_glob)   # imported per call
+    t1 = C._device_token()
+    assert C._device_token() == t1            # stable while nothing changes
+    state["n"] = 2
+    assert C._device_token() != t1            # device appeared: key changes

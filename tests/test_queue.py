@@ -160,12 +160,25 @@ def test_missing_engine_for_category_is_terminal(tmp_path, fixtures):
 
 
 def test_ghost_running_replays_as_interrupted_then_discard(tmp_path, fixtures):
+    # REAL lifecycle: a crashed job has a queued line BEFORE its running
+    # line - the normal case a live process leaves behind on kill -9.
+    # The old recovery only handled an orphan running line (prev=None), so
+    # every real crashed job replayed stuck in "running" forever.
     jp = tmp_path / "journal.jsonl"
-    jp.write_text(json.dumps({
-        "job_id": "ghost-1", "src": str(fixtures["jpg"]), "dst": str(tmp_path / "g.flac"),
-        "category": "audio", "state": "running", "attempts": 0, "ts": time.time()}) + "\n")
+    base = {"job_id": "ghost-1", "src": str(fixtures["jpg"]),
+            "dst": str(tmp_path / "g.flac"), "category": "audio",
+            "attempts": 0}
+    jp.write_text(
+        json.dumps({**base, "state": "queued", "ts": time.time() - 2}) + "\n"
+        + json.dumps({**base, "state": "running", "ts": time.time() - 1}) + "\n")
     j = Journal(jp)
     assert j.records["ghost-1"].state == "interrupted"
+    # the orphan variant (running with no queued line) must recover too
+    jp2 = tmp_path / "journal2.jsonl"
+    jp2.write_text(json.dumps({**base, "job_id": "ghost-2", "state": "verifying",
+                               "ts": time.time()}) + "\n")
+    j2 = Journal(jp2)
+    assert j2.records["ghost-2"].state == "interrupted"
     q = JobQueue(journal=j, events=JsonlWriter(tmp_path / "e.jsonl"),
                  logs_root=tmp_path / "cap", engine_get=lambda c: None)
     assert q.discard() == 1
@@ -188,3 +201,67 @@ def test_add_idempotent_for_done_jobs(tmp_path, fixtures):
     q.run()
     again = q.add(fixtures["jpg"], tmp_path / "i.flac", category="audio")
     assert again.job_id == jid and again.state == "replaced"
+
+
+def test_readd_during_flight_honest_and_fingerprint_at_encode_start(
+        tmp_path, fixtures):
+    """Two bugs, one test: (1) re-adding a file while its worker is mid-
+    convert must NOT fork a second record or stamp state the worker does not
+    own; (2) a 'replaced' record's src_fp is the fingerprint of the bytes
+    the encode STARTED from - a source replaced mid-encode must re-queue
+    afterwards, never be believed stale-matched."""
+    import threading
+    started, release = threading.Event(), threading.Event()
+
+    def conv(src, dst):
+        started.set()
+        assert release.wait(10)
+        src.write_bytes(b"MUTATED MID-ENCODE")   # source swapped in flight
+        dst.write_bytes(b"OUTDATA")
+        return EngineResult(outcome="converted", encoder="fake")
+
+    src = tmp_path / "in.jpg"
+    src.write_bytes(b"ORIGINAL")
+    from transmute.runner.queue import _fingerprint
+    fp_orig = _fingerprint(src)
+    eng = FakeEngine(convert=conv)
+    q = _queue(tmp_path, eng)
+    rec = q.add(src, tmp_path / "out" / "x.flac", category="audio")
+    th = threading.Thread(target=lambda: q.run(max_workers=1))
+    th.start()
+    assert started.wait(10)
+
+    again = q.add(src, tmp_path / "out" / "x.flac", category="audio")
+    assert again.job_id == rec.job_id          # no forked record
+    assert again.state == "running"            # worker still owns it
+
+    release.set()
+    th.join(15)
+    assert not th.is_alive()
+    r = q.journal.records[rec.job_id]
+    assert r.state == "replaced"
+    # the event's size is the OUTPUT size, not a stat of the source
+    from transmute.jsonl import read_jsonl
+    ev = [e for e in read_jsonl(tmp_path / "events.jsonl")
+          if e["event"] == "job_replaced"]
+    assert ev and ev[-1]["size"] == len(b"OUTDATA")
+    # the record claims the bytes the encode began from - not the mutated
+    # ones the encode left behind
+    assert r.src_fp == fp_orig
+    # the mutated file no longer matches it: re-add honestly re-queues
+    re2 = q.add(src, tmp_path / "out" / "x.flac", category="audio")
+    assert re2.state == "queued"
+
+
+def test_unwritable_output_folder_fails_the_job_not_the_run(tmp_path, fixtures):
+    """An unreadable/uncreatable output volume must surface as THIS job's
+    failure with the machine's own error - never kill the runner loop or
+    escape run() as an exception the caller never sees."""
+    blocker = tmp_path / "blocker"
+    blocker.write_bytes(b"i am a file, not a folder")
+    q = _queue(tmp_path, FakeEngine(convert=_ok_convert()))
+    rec = q.add(fixtures["jpg"], blocker / "sub" / "x.flac", category="audio")
+    summary = q.run(max_workers=1)             # must NOT raise
+    r = q.journal.records[rec.job_id]
+    assert r.state == "failed"
+    assert "cannot prepare output folder" in (r.reason or "")

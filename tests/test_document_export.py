@@ -179,3 +179,67 @@ class TestQueueIntegration:
         assert c.snapshot()[0].state == "replaced"
         assert "Hello world" in (out / "note.txt").read_text()
         assert md_source.read_text() == MD               # non-destructive
+
+
+class TestExitStatusIsAuthority:
+    """Two half-truths the engine used to believe: pandoc exiting nonzero
+    while leaving a file that sniffs valid, and LibreOffice killed
+    mid-write leaving a half file with a valid header. The process status
+    and the timeout - not the sniff - decide."""
+
+    @needs_pandoc
+    def test_pandoc_nonzero_exit_beats_look_valid_output(self, engine, md_source,
+                                                         tmp_path, monkeypatch):
+        from pathlib import Path
+        from types import SimpleNamespace
+        import transmute.engines.document as D
+
+        def fake_run(cmd, **kw):
+            Path(cmd[cmd.index("-o") + 1]).write_bytes(b"PK\x03\x04plausible bytes")
+            return SimpleNamespace(ok=False, timed_out=False, returncode=2,
+                                   stderr_text="real pandoc error: bad writer",
+                                   stdout_text="")
+
+        monkeypatch.setattr(D, "run_command", fake_run)
+        res = engine.convert(md_source, tmp_path / "o.docx", target="docx")
+        assert res.outcome == "failed"
+        assert "bad writer" in res.reason
+        assert not (tmp_path / "o.docx").exists()   # garbage never stays
+
+    @needs_lo
+    @needs_pandoc
+    def test_lo_timeout_mid_write_is_not_a_conversion(self, engine, md_source,
+                                                      tmp_path, monkeypatch):
+        from pathlib import Path
+        from types import SimpleNamespace
+        import transmute.engines.document as D
+
+        docx = tmp_path / "s.docx"
+        assert engine.convert(md_source, docx, target="docx").outcome == "converted"
+
+        def fake_run(cmd, **kw):
+            outdir = Path(cmd[cmd.index("--outdir") + 1])
+            outdir.mkdir(parents=True, exist_ok=True)
+            # valid magic, half-written body - exactly the trap
+            (outdir / "s.odt").write_bytes(b"PK\x03\x04half written")
+            return SimpleNamespace(ok=False, timed_out=True, returncode=-9,
+                                   stderr_text="", stdout_text="")
+
+        monkeypatch.setattr(D, "run_command", fake_run)
+        res = engine.convert(docx, tmp_path / "o.odt", target="odt")
+        assert res.outcome == "failed"
+        assert "timed out mid-write" in res.reason
+        assert not (tmp_path / "o.odt").exists()
+
+    def test_truncated_zip_is_not_a_valid_office_file(self, engine, tmp_path):
+        # hermetic: no external tool decides this one
+        half = tmp_path / "half.docx"
+        half.write_bytes(b"PK\x03\x04garbage beyond the header")
+        msg = engine._invalid_output(half, "docx")
+        assert msg and "not a valid DOCX" in msg
+
+        import zipfile
+        good = tmp_path / "good.docx"
+        with zipfile.ZipFile(good, "w") as zf:
+            zf.writestr("[Content_Types].xml", "<?xml version='1.0'?>")
+        assert engine._invalid_output(good, "docx") is None

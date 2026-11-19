@@ -250,3 +250,22 @@ def test_linux_governor_unchanged_by_p6():
     assert g._job is None
     assert g.status()["windows_job_object"] == "n/a"
     assert not any("Job Object" in c for c in g.caveats)
+
+
+def test_struct_layout_matches_winnt_h():
+    """SetInformationJobObject validates nLength against the REAL struct:
+    a 4-byte Affinity (ULONG_PTR is pointer-sized) made sizeof 136 != 144
+    and the kernel rejected every call - silently, because ensure() only
+    records the error and stays degraded. This test pins the ABI and runs
+    on any machine, Windows not required."""
+    import ctypes
+    from transmute.governor.winjob import (
+        JOBOBJECT_BASIC_LIMIT_INFORMATION as B,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION as E,
+    )
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        import pytest
+        pytest.skip("64-bit layout asserted only")
+    assert ctypes.sizeof(B) == 64
+    assert B.Affinity.offset == 48
+    assert ctypes.sizeof(E) == 144

@@ -88,7 +88,17 @@ class JobQueue:
         job_id = make_job_id(src, dst)
         fp = _fingerprint(src)
         existing = self.journal.records.get(job_id)
-        if existing is not None and existing.state != "abandoned":
+        if existing is not None:
+            if existing.state in ("running", "verifying"):
+                # An encode is in flight and a worker thread owns this record
+                # object right now. Re-queuing here would swap the dict entry
+                # for a fresh record while the worker still writes state and
+                # the final fingerprint into the OLD one - the output would
+                # then be stamped with whichever file the dict points at, not
+                # the bytes actually encoded. The worker finishes first; when
+                # new content arrives later its fingerprint differs and this
+                # same call re-queues it honestly.
+                return existing
             if existing.src_fp == fp and existing.state in ("replaced", "kept", "skipped"):
                 return existing  # idempotent: unchanged source, already done
         rec = JournalRecord(job_id=job_id, src=str(src), dst=str(dst),
@@ -212,14 +222,32 @@ class JobQueue:
             src_size = src.stat().st_size
         except OSError:
             src_size = 0  # engine reports its own source error; floor applies
-        short = preflight.shortage(dst.parent, src_size, rec.options)
+        # Disk ops are user-reachable failure points (parent is a file, volume
+        # unmounted, permission denied) - they must fail THIS job with the
+        # machine's own error, never raise out of run() and kill a serve
+        # worker thread that processes everyone else's jobs too.
+        try:
+            short = preflight.shortage(dst.parent, src_size, rec.options)
+        except OSError as exc:
+            self._fail(rec, summary, reason=f"output volume unreadable: {exc}")
+            return
         if short is not None:
             self._fail(rec, summary, reason=preflight.reason_for(short))
             return
 
         staged = self._staged_path(dst, rec.job_id)
-        staged.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._fail(rec, summary, reason=f"cannot prepare output folder: {exc}")
+            return
         log_id = f"{rec.job_id}.a{rec.attempts + 1}"
+        fp_at_start = _fingerprint(src)
+        # ^ fingerprint the bytes this encode actually starts from. If the
+        # user replaces the source mid-encode, the "replaced" record must
+        # carry the OLD content's fingerprint - recording a late re-stat
+        # would falsely certify the new file as converted and suppress its
+        # re-add forever.
         try:
             result = engine.convert(src, staged, governor=self.governor,
                                     log_id=log_id, log_root=self.logs_root,
@@ -282,16 +310,17 @@ class JobQueue:
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.replace(staged, dst)  # atomic within same filesystem
+            out_size = dst.stat().st_size
         except OSError as exc:
             staged.unlink(missing_ok=True)
             self._fail(rec, summary, reason=f"atomic replace failed: {exc}")
             return
 
         self.journal.transition(rec, "replaced", encoder=result.encoder,
-                                src_fp=_fingerprint(src))
+                                src_fp=fp_at_start)
         self.events.append("job_replaced", job_id=rec.job_id, output=dst,
                            encoder=result.encoder, seconds=round(result.seconds or 0.0, 2),
-                           size=dst.stat().st_size)
+                           size=out_size)
         summary.add("replaced", rec.job_id, output=str(dst), encoder=result.encoder)
 
     # ------------------------------------------------------------- failure ladder

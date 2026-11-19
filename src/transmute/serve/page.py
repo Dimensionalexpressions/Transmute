@@ -150,7 +150,7 @@ $('#all').onclick=async()=>{
   try{r=await j('/api/convert_batch',{method:'POST',
     headers:{'content-type':'application/json'},body:JSON.stringify({items})})}
   catch(err){alert('Could not start: '+err.message);return}
-  for(const x of (r.refused||[])){const c=byName[x.name];
+  for(const x of (r.refused||[])){const c=cards[x.upload_id]||byName[x.name];
     if(c){c.why.textContent='not queued: '+x.reason;c.why.style.display='';}}
   if(!r.jobs.length)alert('None of these could convert here - see why on each card');
   refresh();

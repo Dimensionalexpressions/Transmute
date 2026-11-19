@@ -233,17 +233,21 @@ class ServeState:
         for it in items:
             up = self.uploads.get(str(it.get("upload_id") or ""))
             target = str(it.get("target") or "")
+            uid = str(it.get("upload_id") or "")
             if up is None:
-                refused.append({
-                    "name": str(it.get("upload_id") or "?"),
-                    "reason": "upload not found - upload the file again"})
+                # upload_id travels back with every refusal: display names
+                # are NOT unique (safe_name never dedups), so the page can
+                # only attribute "not queued" honestly by the id it sent
+                refused.append({"name": uid or "?", "upload_id": uid,
+                                "reason": "upload not found - upload the file again"})
                 continue
             if not target:
-                refused.append({"name": up.name, "reason": "target is required"})
+                refused.append({"name": up.name, "upload_id": uid,
+                                "reason": "target is required"})
                 continue
             why = self._verdict(up, target)
             if why:
-                refused.append({"name": up.name, "reason": why})
+                refused.append({"name": up.name, "upload_id": uid, "reason": why})
                 continue
             kw = {k: v for k, v in it.items()
                   if k not in ("upload_id", "target") and v not in (None, "")}
@@ -251,8 +255,9 @@ class ServeState:
                 info = self.controller.enqueue(up.path, self.outputs_dir,
                                                up.category, target, **kw)
                 jobs.append(info.job_id)
-            except Exception as exc:  # noqa: BLE001 - one bad file must
-                refused.append({"name": up.name, "reason": str(exc)})  # not
+            except Exception as exc:  # noqa: BLE001 - one bad file must not
+                refused.append({"name": up.name, "upload_id": uid,
+                                "reason": str(exc)})                       # kill batch
         if jobs:
             self.wake()
         return {"jobs": jobs, "refused": refused}
@@ -322,6 +327,17 @@ class ServeState:
             self._wake.wait()
             self._wake.clear()
             while not self._stop.is_set():
-                summary = self.queue.run(max_workers=1)
+                try:
+                    summary = self.queue.run(max_workers=1)
+                except Exception as exc:  # noqa: BLE001
+                    # Defense in depth: queue._process catches per-job errors,
+                    # but an error escaping the runner must kill THAT burst,
+                    # never this thread - a dead worker silently stops every
+                    # later upload converting, with no error anywhere the
+                    # user can see. Report it in the event log and stay alive.
+                    self.queue.events.append(
+                        "worker_error",
+                        reason=f"{type(exc).__name__}: {exc}")
+                    break
                 if summary.processed == 0:
                     break

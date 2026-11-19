@@ -110,8 +110,9 @@ def _show_open_files_dialog(parent: QWidget, caption: str, directory: str,
                              ) -> "list[str]":
     """Non-native multi-file picker with an up-to-date sidebar."""
     dlg = QFileDialog(parent, caption, directory)
-    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-    dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # one dialog per
+    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)  # browse,
+    dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)         # not one
     dlg.setSidebarUrls(_sidebar_urls_with_fresh_mounts())
     return dlg.selectedFiles() if dlg.exec() == QDialog.DialogCode.Accepted else []
 
@@ -120,6 +121,7 @@ def _show_existing_dir_dialog(parent: QWidget, caption: str, directory: str,
                                ) -> str:
     """Non-native single-directory picker with an up-to-date sidebar."""
     dlg = QFileDialog(parent, caption, directory)
+    dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # see above
     dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
     dlg.setFileMode(QFileDialog.FileMode.Directory)
     dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
@@ -917,7 +919,10 @@ class MainWindow(QMainWindow):
         src = ""
         if cat == "video" and target and self.files.count():
             src = self.files.item(0).data(Qt.ItemDataRole.UserRole) or ""
-        if not src or (self._worker is not None and self._worker.is_alive()):
+        if not src or (self._worker is not None and self._worker.is_alive()) \
+                or self._bench_live:
+            # a full-machine benchmark sample is running: measuring an
+            # estimate through it would describe neither pass honestly
             self.lbl_est.hide()
             return
         tinfo = self._target_info(cat, target)
@@ -1008,6 +1013,13 @@ class MainWindow(QMainWindow):
             return
         if self._worker is not None and self._worker.is_alive():
             return  # a conversion is hogging the CPUs - measure later
+        # one measurement on this machine at a time: an in-flight estimate
+        # sample would run against the benchmark and poison both numbers
+        est = getattr(self, "_est_stop", None)
+        if est is not None:
+            est.set()
+            self._est_stop = None
+        self.lbl_est.hide()
         self._bench_live = True
         self._bench_cancel = False
         self.btn_bench.setText("Measuring this PC… click to cancel")
@@ -1412,6 +1424,7 @@ class MainWindow(QMainWindow):
                 kw["crf"] = int(self.crf_box.value())
         ext = self.remux_box.currentText() if remux else None
         added = 0
+        refused: list[str] = []
         for i in range(self.files.count()):
             it = self.files.item(i)
             src = it.data(Qt.ItemDataRole.UserRole)
@@ -1421,16 +1434,33 @@ class MainWindow(QMainWindow):
             # enqueue a file the row wasn't chosen for
             if self.ctrl.category_of(src) != cat:
                 continue
-            self.ctrl.enqueue(Path(src), Path(dst), cat, target,
-                              ext=ext, **kw)
-            added += 1
+            # One unreadable file (encrypted PDF, corrupt header) must not
+            # kill this loop mid-way: files already queued would sit
+            # "queued" forever because the worker line below never ran,
+            # with no message anywhere. Each file gets its own verdict, in
+            # this machine's own words - nothing is silently dropped.
+            try:
+                self.ctrl.enqueue(Path(src), Path(dst), cat, target,
+                                  ext=ext, **kw)
+                added += 1
+            except Exception as exc:  # noqa: BLE001
+                refused.append(f"{Path(src).name}: {exc}")
+        if refused:
+            detail = "\n".join(refused)
+            self.lbl_status.setToolTip(detail)
+            shown = "; ".join(refused[:3])
+            if len(refused) > 3:
+                shown += f" (+{len(refused) - 3} more, hover for all)"
         if not added:
             # non-modal: a blocking dialog would also stall the offscreen
             # test tier; the status line is where users look after a click
             self.lbl_status.setText(
+                f"Refused {len(refused)}: {shown}" if refused else
                 "Nothing to do - no listed file matches this category.")
             return
         self._start_worker()
+        if refused:
+            self.lbl_status.setText(f"Refused {len(refused)}: {shown}")
 
     def _start_worker(self) -> None:
         self.btn_run.setEnabled(False)
@@ -1688,6 +1718,21 @@ class MainWindow(QMainWindow):
             self.lbl_serve.setText("not serving")
 
     def closeEvent(self, event):  # noqa: N802
+        # Signal every background measurer FIRST: the joins below are
+        # bounded but can still take seconds, and an unsignalled
+        # benchmark/estimate pass keeps encoding full-machine while the
+        # window is already gone. A running conversion queue is told to
+        # stop taking further jobs; whatever ffmpeg is mid-file when the
+        # process exits replays as interrupted on next start (journal
+        # recovery), never as a silent success.
+        self._bench_cancel = True
+        est = getattr(self, "_est_stop", None)
+        if est is not None:
+            est.set()
+        try:
+            self.ctrl.queue.stop()
+        except Exception:  # noqa: BLE001 - shutdown must not raise here
+            pass
         if self._watcher is not None:
             self._watcher.stop()  # joins observer + poll threads (daemons too)
         self.serve.stop()  # closing the app must close the HTTP door

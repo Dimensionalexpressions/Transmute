@@ -23,6 +23,9 @@ CODEC_BY_EXT = {".mp3": "mp3", ".m4a": "aac", ".aac": "aac", ".ogg": "vorbis",
                 ".opus": "opus", ".flac": "flac", ".wav": "pcm_s16le",
                 ".mka": "flac", ".alac": "alac"}
 LOSSLESS = {"flac", "alac", "pcm_s16le", "wav"}
+# Containers ffmpeg can hold MORE THAN ONE audio stream in (measured: the
+# muxer accepts several -map 0:a streams). mp3/m4a/adts/wav hold exactly one.
+MULTI_AUDIO_FMT = {"matroska", "ogg"}
 
 
 class AudioEngine:
@@ -63,9 +66,25 @@ class AudioEngine:
         asrc = self.probe.audio_streams(src)
         if not asrc:
             return EngineResult("failed", reason="no audio stream in source")
-        src_codec = (asrc[0].get("codec_name") or "").lower()
-        if src_codec == target and bitrate is None and quality is None:
+        src_codecs = {(s.get("codec_name") or "").lower() for s in asrc}
+        src_codecs.discard("")
+        if src_codecs == {target} and bitrate is None and quality is None:
+            # ALL tracks must already be the target codec - skipping on the
+            # strength of track 1 alone would strand every other track
             return EngineResult("skipped", reason=f"already {target}-encoded")
+        # A multi-track source (commentary, dual-language) into a one-track
+        # container would silently drop tracks. The doctrine: the machine's
+        # own count becomes the visible reason, and the user gets the choice
+        # (.mka holds them all) instead of a guess made in the dark.
+        if len(asrc) > 1 and fmt not in MULTI_AUDIO_FMT:
+            return EngineResult(
+                "failed",
+                reason=f"source has {len(asrc)} audio tracks but {dst.suffix} "
+                       f"holds one; converting would silently drop "
+                       f"{len(asrc) - 1}. Convert to .mka to keep them all.")
+        # all audio streams when the container takes them; first track only
+        # for the single-track containers a 1-track source fits anyway
+        amap = ["-map", "0:a"] if len(asrc) > 1 else ["-map", "0:a:0"]
 
         cap = self.pick_encoder(target)
         if cap is None:
@@ -73,7 +92,7 @@ class AudioEngine:
 
         cmd: list[Any] = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
                           "-i", src,
-                          "-map", "0:a:0", "-map", "0:v?", "-map_metadata", "0",
+                          *amap, "-map", "0:v?", "-map_metadata", "0",
                           "-map_chapters", "0",
                           "-c:a", cap.name, "-c:v", "copy",
                           "-f", fmt]
@@ -107,7 +126,8 @@ class AudioEngine:
                     in res.stderr_text or "disposition" in res.stderr_text:
                 return self.convert_no_art(src, dst, target=target, cap=cap, fmt=fmt,
                                            bitrate=bitrate, t0=t0, governor=governor,
-                                           log_id=log_id, log_root=log_root)
+                                           log_id=log_id, log_root=log_root,
+                                           amap=amap)
             return EngineResult("failed", reason=f"encode failed: {reason}",
                                 seconds=elapsed, encoder=cap.name, log_path=log_path)
         if not dst.is_file() or dst.stat().st_size == 0:
@@ -119,9 +139,9 @@ class AudioEngine:
                             data={"codec": target, "container": fmt})
 
     def convert_no_art(self, src, dst, *, target, cap, fmt, bitrate, t0, governor,
-                       log_id, log_root):
+                       log_id, log_root, amap=None):
         cmd = [self.engines.path("ffmpeg"), "-hide_banner", "-nostdin", "-loglevel",
-               "error", "-i", src, "-map", "0:a:0", "-map_metadata", "0",
+               "error", "-i", src, *(amap or ["-map", "0:a:0"]), "-map_metadata", "0",
                "-map_chapters", "0", "-c:a", cap.name, "-f", fmt]
         if bitrate:
             cmd += ["-b:a", bitrate]
@@ -147,6 +167,13 @@ class AudioEngine:
         d_out = self.probe.audio_streams(out)
         if not d_out:
             return EngineResult("failed", reason="output has no audio stream")
+        # the track count is compared on purpose (the docstring promised it
+        # all along): a conversion that quietly kept one of three tracks
+        # must fail visibly, not certify itself "verified"
+        if len(d_src) != len(d_out):
+            return EngineResult(
+                "failed",
+                reason=f"audio track count changed {len(d_src)} -> {len(d_out)}")
         t1, t2 = self.probe.duration_s(src), self.probe.duration_s(out)
         if t1 is not None and t2 is not None and abs(t1 - t2) > max(0.75, t1 * 0.02):
             return EngineResult("failed", reason=f"duration changed {t1:.2f}s -> {t2:.2f}s")

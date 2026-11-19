@@ -934,13 +934,17 @@ class ConverterController:
         ffmpeg = EngineManager().path("ffmpeg")
         if ffmpeg is None or not src.is_file():
             return None
-        td = self._preview_dir or Path(tempfile.mkdtemp(prefix="transmute-prev-"))
+        # claim the temp dir BEFORE decoding: a failed decode must not
+        # orphan the mkdtemp - the dir stays owned and is reused/cleaned
+        # like every other preview call
+        if self._preview_dir is None:
+            self._preview_dir = Path(tempfile.mkdtemp(prefix="transmute-prev-"))
+        td = self._preview_dir
         out = td / "frame.png"
         res = run_command([ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
                            "-i", src, "-frames:v", "1", "-y", out], timeout_s=60)
         if not res.ok or not out.is_file() or out.stat().st_size == 0:
             return None
-        self._preview_dir = td
         return out
 
     def options_for(self, category: str, target: str,
@@ -1045,7 +1049,10 @@ class ConverterController:
         return self.queue.cancel_all()
 
     def snapshot(self) -> list[JobInfo]:
-        return [self._info(r) for r in self.queue.journal.records.values()]
+        # list() first: the watch thread inserts new records into this dict
+        # at any moment; iterating a live dict raises RuntimeError inside
+        # the GUI refresh timer.
+        return [self._info(r) for r in list(self.queue.journal.records.values())]
 
     @staticmethod
     def _info(rec: Any) -> JobInfo:

@@ -53,7 +53,12 @@ class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
         ("MinimumWorkingSetSize", ctypes.c_size_t),
         ("MaximumWorkingSetSize", ctypes.c_size_t),
         ("ActiveProcessLimit", ctypes.c_uint32),
-        ("Affinity", ctypes.c_uint32),
+        # Affinity is ULONG_PTR in winjob.h - pointer-sized. c_uint32 made
+        # every following field 4 bytes early and sizeof 136 instead of
+        # 144, so SetInformationJobObject rejected the struct outright
+        # (ERROR_BAD_LENGTH) on 64-bit Windows; c_size_t mirrors ULONG_PTR
+        # exactly on both 32- and 64-bit ABIs.
+        ("Affinity", ctypes.c_size_t),
         ("PriorityClass", ctypes.c_uint32),
         ("SchedulingClass", ctypes.c_uint32),
     ]

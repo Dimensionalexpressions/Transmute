@@ -14,9 +14,10 @@ Consequences that follow from that design:
     journal, same as the desktop app.
 
 v1 scope, stated honestly: one conversion per request (the GUI keeps the
-watch-folder/batch surface), no auth (this is a home-LAN tool - see
-security note in app.py), and conversions run one at a time so a phone
-upload can never stampede the machine you are sitting at.
+watch-folder/batch surface), and conversions run one at a time so a phone
+upload can never stampede the machine you are sitting at. Anything that
+binds off-loopback carries a token (see app.py) - localhost needs none,
+because being on this machine already means being trusted.
 """
 from __future__ import annotations
 
@@ -123,6 +124,18 @@ class ServeState:
     report_provider: Callable[[], Any] | None = None
     queue: JobQueue | None = None
     governor: Any = None
+    # None => no login (default on loopback: this machine already IS the
+    # trust boundary). Anything reachable from off-box must carry a token -
+    # see serve.app.resolve_token, which generates one for non-loopback binds.
+    auth_token: str | None = None
+
+    def token_ok(self, provided: str | None) -> bool:
+        """Constant-time check; a token is a key, so no early-exit compare."""
+        import secrets
+        if not self.auth_token:
+            return True
+        return bool(provided) and secrets.compare_digest(str(provided),
+                                                         self.auth_token)
 
     def __post_init__(self) -> None:
         p = self.paths or app_paths()

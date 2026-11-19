@@ -1,0 +1,99 @@
+"""'Serve' dialog: start/stop the HTTP front door from the desktop app.
+
+All logic lives in serve.launcher (Qt-free, tested headless); this is only
+its face. The wording is deliberately plain about what the link lets other
+devices do - the token is the whole lock.
+"""
+from __future__ import annotations
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QRadioButton,
+    QVBoxLayout,
+)
+
+
+class ServeDialog(QDialog):
+    def __init__(self, launcher, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Serving files")
+        self.ln = launcher
+        lay = QVBoxLayout(self)
+        self.rad_off = QRadioButton("Not serving (off)")
+        self.rad_local = QRadioButton("Only this computer (127.0.0.1, no login)")
+        self.rad_lan = QRadioButton("My home network (phone / laptop can convert here)")
+        for r in (self.rad_off, self.rad_local, self.rad_lan):
+            r.toggled.connect(self._apply)
+            lay.addWidget(r)
+        row = QHBoxLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.setReadOnly(True)
+        self.url_edit.setPlaceholderText("link stays empty while off")
+        self.btn_copy = QPushButton("Copy link")
+        self.btn_copy.clicked.connect(
+            lambda: QApplication_clipboard(self.url_edit.text()))
+        row.addWidget(self.url_edit, stretch=1)
+        row.addWidget(self.btn_copy)
+        lay.addLayout(row)
+        self.lbl = QLabel()
+        self.lbl.setWordWrap(True)
+        lay.addWidget(self.lbl)
+        note = QLabel(
+            "Serving never touches the watch folders: it only converts what "
+            "someone uploads, one at a time, results verify before download. "
+            "On the home-network setting the link carries an access token - "
+            "anyone who has that link can use this computer, so share it like "
+            "a Wi-Fi password. Stopping the app stops serving.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8a8a94")
+        lay.addWidget(note)
+        {"off": self.rad_off, "local": self.rad_local,
+         "lan": self.rad_lan}.get(launcher.mode, self.rad_off).setChecked(True)
+        self._show(launcher.status())
+        self._ready = True  # setChecked storms above must not start servers
+
+    def _apply(self) -> None:
+        # toggling one radio off checks the next: two signals, one decision
+        if not getattr(self, "_ready", False) or getattr(self, "_queued", False):
+            return
+        self._queued = True
+        QTimer.singleShot(0, self._apply_now)
+
+    def _apply_now(self) -> None:
+        self._queued = False
+        mode = ("lan" if self.rad_lan.isChecked() else
+                "local" if self.rad_local.isChecked() else "off")
+        if mode == self.ln.mode and mode != "off":
+            self._show(self.ln.status())
+            return
+        try:
+            if mode == "off":
+                self.ln.stop()
+            else:
+                self._show(self.ln.start(mode))
+            self._show(self.ln.status())
+        except Exception as exc:  # noqa: BLE001 - dialog must not explode
+            self.lbl.setText(f"could not start: {exc}")
+            self.rad_off.setChecked(True)
+
+
+    def _show(self, st: dict) -> None:
+        self.url_edit.setText(st.get("url") or "")
+        if st.get("error"):
+            self.lbl.setText(st["error"])
+        elif st.get("mode") == "lan":
+            self.lbl.setText("Serving on your network. Open the link on the "
+                             "other device - it asks nothing else.")
+        elif st.get("mode") == "local":
+            self.lbl.setText("Serving this computer only (http://127.0.0.1).")
+        else:
+            self.lbl.setText("Not serving.")
+
+
+def QApplication_clipboard(text: str) -> None:  # tiny indirection for tests
+    if not text:
+        return
+    from PySide6.QtWidgets import QApplication
+    cb = QApplication.clipboard()
+    if cb is not None:
+        cb.setText(text)

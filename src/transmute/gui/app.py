@@ -165,6 +165,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Transmute")
         self.resize(980, 640)
         self.setAcceptDrops(True)
+        # serve mode: HTTP front door onto this same controller/queue,
+        # started on demand from its dialog (serve.launcher owns it)
+        from ..serve.launcher import ServeLauncher
+        self.serve = ServeLauncher()
+        self._serve_dlg = None
         self._build()
         self._poll = QTimer(self)
         self._poll.setInterval(400)
@@ -249,6 +254,17 @@ class MainWindow(QMainWindow):
         self.lbl_watch.setWordWrap(True)
         wv.addWidget(self.lbl_watch)
         lv.addWidget(wbox)
+
+        # ---- serve mode: the same core, reached over HTTP (off by default)
+        sbox = QGroupBox("Serve (convert from other devices)")
+        sh = QHBoxLayout(sbox)
+        self.lbl_serve = QLabel("not serving")
+        self.lbl_serve.setWordWrap(True)
+        self.btn_serve = QPushButton("Serving…")
+        self.btn_serve.clicked.connect(self._serve_dialog)
+        sh.addWidget(self.lbl_serve, stretch=1)
+        sh.addWidget(self.btn_serve)
+        lv.addWidget(sbox)
         splitter.addWidget(left)
 
         # right: what this machine can do, chosen from the probed matrix
@@ -1482,9 +1498,28 @@ class MainWindow(QMainWindow):
         self._watch_more = False
         self._start_worker()
 
+    def _serve_dialog(self) -> None:
+        from .serve_dialog import ServeDialog
+        if self._serve_dlg is None:
+            self._serve_dlg = ServeDialog(self.serve, self)
+            self._serve_dlg.finished.connect(self._serve_status)
+        self._serve_dlg.show()
+        self._serve_dlg.raise_()
+
+    def _serve_status(self) -> None:
+        st = self.serve.status()
+        if st["mode"] == "lan" and st["running"]:
+            self.lbl_serve.setText("serving on your home network - "
+                                   + st["url"])
+        elif st["mode"] == "local" and st["running"]:
+            self.lbl_serve.setText("serving on this computer only")
+        else:
+            self.lbl_serve.setText("not serving")
+
     def closeEvent(self, event):  # noqa: N802
         if self._watcher is not None:
             self._watcher.stop()  # joins observer + poll threads (daemons too)
+        self.serve.stop()  # closing the app must close the HTTP door
         super().closeEvent(event)
 
     # ------------------------------------------------------------- drops

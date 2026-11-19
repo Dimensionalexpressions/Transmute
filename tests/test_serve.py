@@ -72,17 +72,31 @@ class _Server:
         self.state.stop()
 
     # ---- tiny client -----------------------------------------------------
-    def get(self, path: str) -> tuple[int, bytes]:
+    def _hdr(self, tok: str | None = None,
+             cookie: str | None = None) -> dict[str, str]:
+        h = {}
+        if tok is not None:
+            h["X-Token"] = tok
+        if cookie is not None:
+            h["Cookie"] = cookie
+        return h
+
+    def get(self, path: str, tok: str | None = None,
+            cookie: str | None = None) -> tuple[int, bytes]:
+        req = urllib.request.Request(self.base + path,
+                                     headers=self._hdr(tok, cookie))
         try:
-            with urllib.request.urlopen(self.base + path, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()
 
-    def post_json(self, path: str, payload: dict) -> tuple[int, dict]:
+    def post_json(self, path: str, payload: dict,
+                  tok: str | None = None) -> tuple[int, dict]:
         req = urllib.request.Request(
             self.base + path, data=json.dumps(payload).encode(),
-            headers={"content-type": "application/json"}, method="POST")
+            headers={**self._hdr(tok),
+                     "content-type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.status, json.loads(r.read() or b"{}")
@@ -93,14 +107,16 @@ class _Server:
                 body = {}
             return e.code, body
 
-    def upload(self, filename: str, data: bytes) -> tuple[int, dict]:
+    def upload(self, filename: str, data: bytes,
+               tok: str | None = None) -> tuple[int, dict]:
         b = uuid.uuid4().hex
         head = (f'--{b}\r\nContent-Disposition: form-data; name="file"; '
                 f'filename="{filename}"\r\nContent-Type: image/png\r\n\r\n').encode()
         body = head + data + f"\r\n--{b}--\r\n".encode()
         req = urllib.request.Request(
             self.base + "/api/upload", data=body,
-            headers={"content-type": f"multipart/form-data; boundary={b}"},
+            headers={**self._hdr(tok),
+                     "content-type": f"multipart/form-data; boundary={b}"},
             method="POST")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -267,3 +283,110 @@ def test_first_benchmark_is_warmed_not_faked(tmp_path):
         assert "image" in info["categories"]
     finally:
         st.stop()
+
+
+# ------------------------------------------------------------- token lock
+def test_token_locks_every_door_but_the_page(tmp_path):
+    srv = _Server(tmp_path / "tok", auth_token="sekret")
+    try:
+        assert srv.get("/")[0] == 200              # page shell: public, asks
+        assert srv.get("/healthz")[0] == 401       # even a ping costs a key
+        assert srv.get("/api/info")[0] == 401
+        assert srv.get("/api/info", tok="wrong")[0] == 401
+        code, body = srv.get("/api/info", tok="sekret")
+        assert code == 200 and "image" in json.loads(body)["categories"]
+        assert srv.upload("t.png", _png())[0] == 401   # uploads locked too
+        code, up = srv.upload("t.png", _png(), tok="sekret")
+        assert code == 200
+        assert srv.get("/api/jobs", cookie="trtoken=sekret")[0] == 200
+        # cookies are the download path: a plain <a href> sends no headers,
+        # so the browser must be able to authenticate with the cookie alone
+        code, res = srv.post_json(
+            "/api/convert",
+            {"upload_id": up["upload_id"], "target": "webp"}, tok="sekret")
+        job = res["job_id"]
+        srv.wait_done(job)
+        assert srv.get(f"/download/{job}")[0] == 401
+        got = srv.get(f"/download/{job}", cookie="trtoken=sekret")
+        assert got[0] == 200 and got[1][:4] == b"RIFF"
+    finally:
+        srv.close()
+
+
+def test_token_rules_are_one_rule():
+    from transmute.serve.app import resolve_token
+    assert resolve_token("127.0.0.1", None) is None   # this machine IS trust
+    assert resolve_token("localhost", None) is None
+    tok = resolve_token("0.0.0.0", None)
+    assert tok and len(tok) >= 16
+    assert resolve_token("0.0.0.0", None) != tok      # fresh key per start
+    assert resolve_token("0.0.0.0", "mine") == "mine"  # --token pins it
+    assert resolve_token("127.0.0.1", "mine") == "mine"
+
+
+# ------------------------------------------------------------- launcher
+def test_launcher_lifecycle_switch_and_stop(tmp_path):
+    from urllib.parse import urlparse
+    from transmute.serve.launcher import ServeLauncher
+    n = [0]
+
+    def factory(**kw):
+        n[0] += 1
+        return ServeState(paths=AppPaths(tmp_path / f"l{n[0]}"),
+                          report_provider=_report, **kw)
+
+    ln = ServeLauncher(state_factory=factory)
+    try:
+        st = ln.start("local", port=0)
+        assert st["running"] and st["mode"] == "local" and not st["token"]
+        assert st["url"].startswith("http://127.0.0.1:")
+        base = st["url"].split("?")[0]
+        with urllib.request.urlopen(base + "healthz", timeout=5) as r:
+            assert r.status == 200                  # localhost: no key
+        st = ln.start("lan", port=0)                # switch adds the lock
+        assert st["token"] and "?token=" in st["url"]
+        host = urlparse(st["url"]).hostname or "127.0.0.1"
+        port = urlparse(st["url"]).port
+        url = f"http://127.0.0.1:{port}/api/info"
+        req = urllib.request.Request(url, headers={"X-Token": "nope"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("wrong token was accepted")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+        req = urllib.request.Request(url, headers={"X-Token": st["token"]})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+        assert host  # lan url names the address a phone would use
+        ln.stop()
+        assert ln.status()["mode"] == "off"
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz",
+                                   timeout=2)
+            raise AssertionError("port still open after stop")
+        except (urllib.error.HTTPError, OSError):
+            pass                                    # door closed
+    finally:
+        ln.stop()
+
+
+def test_launcher_reports_a_busy_port(tmp_path):
+    from transmute.serve.launcher import ServeLauncher
+    n = [0]
+
+    def factory(**kw):
+        n[0] += 1
+        return ServeState(paths=AppPaths(tmp_path / f"p{n[0]}"),
+                          report_provider=_report, **kw)
+
+    a = ServeLauncher(state_factory=factory)
+    b = ServeLauncher(state_factory=factory)
+    st = a.start("local", port=18965)
+    assert st["running"], st["error"]
+    try:
+        st2 = b.start("local", port=18965)
+        assert not st2["running"] and st2["error"]  # spoken, not swallowed
+        assert b.status()["mode"] == "off"
+    finally:
+        a.stop()
+        b.stop()

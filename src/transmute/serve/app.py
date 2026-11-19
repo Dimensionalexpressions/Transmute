@@ -1,10 +1,14 @@
 """HTTP front door for serve mode (Phase B).
 
-Security, stated plainly (v1 is a home-LAN tool, no auth):
-  * binds to 127.0.0.1 by DEFAULT - only this machine can reach it;
-  * --lan binds 0.0.0.0: anyone on the local network can then upload files
-    and make this machine convert them. There is deliberately no login:
-    v1 assumes a trusted home LAN, like a printer. Do not --lan in public.
+Security, stated plainly:
+  * binds to 127.0.0.1 by DEFAULT - only this machine can reach it, and
+    no login is asked for: being on this machine already means trusted;
+  * anything reachable from OFF this machine (--lan, or --host elsewhere)
+    requires an access token: a real one is generated at startup and
+    printed once as a ready-to-open link. The page hands it back via
+    X-Token header / cookie; wrong or missing => 401. --token pins your
+    own. The token is the only lock - anyone holding the link can make
+    this machine convert files, so treat the link like a Wi-Fi password;
   * uploads stream to disk with a size cap (default 2 GB, --max-upload-mb);
     filenames are treated as hostile input (see core.safe_name);
   * downloads only resolve job ids recorded in our own journal.
@@ -25,6 +29,27 @@ from .page import PAGE_TEMPLATE
 
 _CHUNK = 1 << 20
 
+LOOPBACKS = ("127.0.0.1", "localhost", "::1")
+
+
+def resolve_token(host: str, token: str | None) -> str | None:
+    """One rule, no surprises: on-loopback = no login; anywhere the traffic
+    can come from other machines = token, generated if not supplied."""
+    import secrets
+    if token:
+        return token
+    if host not in LOOPBACKS:
+        return secrets.token_urlsafe(18)
+    return None
+
+
+def _cookie(request: Request, name: str) -> str | None:
+    for part in (request.headers.get("cookie") or "").split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value
+    return None
+
 
 def create_app(state: ServeState | None = None) -> FastAPI:
     st = state or ServeState()
@@ -37,6 +62,19 @@ def create_app(state: ServeState | None = None) -> FastAPI:
 
     app = FastAPI(title="Transmute serve", docs_url=None, redoc_url=None,
                   lifespan=lifespan)
+
+    @app.middleware("http")
+    async def auth_gate(request, call_next):
+        # '/' stays public: it is only the empty page shell, which then
+        # asks for the token before ANY data crosses this door.
+        if (st.auth_token and request.url.path != "/"
+                and not st.token_ok(request.headers.get("x-token")
+                                    or _cookie(request, "trtoken"))):
+            return JSONResponse({"detail": "access token required - "
+                                           "open the link shown on the "
+                                           "computer running Transmute"},
+                                status_code=401)
+        return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -136,17 +174,32 @@ def main(argv: list[str] | None = None) -> int:
                     help="bind address (default 127.0.0.1; --lan => 0.0.0.0)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--lan", action="store_true",
-                    help="bind 0.0.0.0 - anyone on your local network can "
-                         "convert files here (no login exists; home LAN only)")
+                    help="bind 0.0.0.0 - reachable from your local network; "
+                         "an access token is then generated and printed once")
+    ap.add_argument("--token", default=None,
+                    help="access token to require (generated automatically "
+                         "for any non-localhost bind; none needed on 127.0.0.1)")
     ap.add_argument("--max-upload-mb", type=float, default=2048.0)
     args = ap.parse_args(argv)
     host = args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
 
     import uvicorn
-    st = ServeState(max_upload_mb=args.max_upload_mb)
+    token = resolve_token(host, args.token)
+    st = ServeState(max_upload_mb=args.max_upload_mb, auth_token=token)
     scope = ("EVERY device on your local network"
-             if host != "127.0.0.1" else "only this computer")
+             if host not in LOOPBACKS else "only this computer")
+    # flush: this promise must be readable even when stdout is a log file
     print(f"Transmute serve http://{host}:{args.port}  "
-          f"(reachable from {scope}; no login - keep it on a network you trust)")
+          f"(reachable from {scope})", flush=True)
+    if token:
+        shown = host
+        if host == "0.0.0.0":  # a phone cannot open '0.0.0.0'; name the real address
+            from .launcher import local_ip
+            shown = local_ip()
+        print(f"  access token: {token}", flush=True)
+        print(f"  open on another device: "
+              f"http://{shown}:{args.port}/?token={token}", flush=True)
+        print("  the token IS the lock - anyone with that link can use this "
+              "machine to convert files", flush=True)
     uvicorn.run(create_app(st), host=host, port=args.port, log_level="warning")
     return 0

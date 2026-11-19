@@ -36,6 +36,7 @@ h2{font-size:15px;margin:26px 0 2px}
 <h1>Transmute</h1>
 <div class="sub">Drop a file - the conversion runs on this machine and the result comes back to you. Max upload: {{ '%.0f' % max_upload_mb }} MB.</div>
 <div id="drop">Drop files here, or click to choose<input id="pick" type="file" multiple hidden></div>
+<div id="gate" class="card" style="display:none"><span class="name">This Transmute is locked.</span><span class="cat">open the link shown on the computer running Transmute, or paste its access token</span><input id="gatein" type="password" placeholder="access token" style="flex:1 1 200px;background:#1a1a22;color:#e6e6ea;border:1px solid #33333d;border-radius:7px;padding:6px 8px"><button id="gatebtn">Open</button><span id="gateerr" class="why" style="display:none"></span></div>
 <div id="warm" class="why" style="display:none">This machine is still benchmarking itself - the options below appear as soon as it has measured what it can do. You can upload already.</div>
 <h2>Convert</h2><div id="files"></div>
 <h2>Jobs <button id="cancel" style="float:right;padding:3px 10px;font-size:12px">Cancel queued</button></h2>
@@ -47,14 +48,29 @@ what this machine has measured it can do.</footer>
 "use strict";
 let INFO=null, uploads={}, pending=[];
 const $=s=>document.querySelector(s);
+let TK=sessionStorage.getItem('trtoken')||'';
+{const q=new URLSearchParams(location.search),t=q.get('token');
+ if(t){TK=t;sessionStorage.setItem('trtoken',t);history.replaceState(null,'',location.pathname)}}
+if(TK)document.cookie='trtoken='+encodeURIComponent(TK)+';path=/;samesite=lax';
 const esc=t=>{const d=document.createElement('span');d.textContent=t;return d.innerHTML;};
-async function j(u,opt){const r=await fetch(u,opt);if(!r.ok){let m=r.statusText;try{m=(await r.json()).detail||m}catch(e){}throw new Error(m)}return r.json()}
+async function j(u,opt){opt=opt||{};const h=opt.headers||{};if(TK)h['x-token']=TK;opt.headers=h;
+ const r=await fetch(u,opt);if(!r.ok){let m=r.statusText;try{m=(await r.json()).detail||m}catch(e){}
+  if(r.status===401)askToken();
+  throw new Error(m)}return r.json()}
+function askToken(){$('#gate').style.display='flex';$('#drop').style.visibility='hidden'}
+$('#gatebtn').onclick=()=>{TK=$('#gatein').value.trim();if(!TK)return;
+ sessionStorage.setItem('trtoken',TK);document.cookie='trtoken='+encodeURIComponent(TK)+';path=/;samesite=lax';
+ $('#gateerr').style.display='none';boot().catch(e=>{$('#gateerr').textContent=e.message;$('#gateerr').style.display=''})};
+$('#gatein').onkeydown=e=>{if(e.key==='Enter')$('#gatebtn').click()};
 async function boot(){
-  const info=await j('/api/info');
+  let info;
+  try{info=await j('/api/info')}
+  catch(err){if(String(err.message).includes('token')){askToken();return}throw err}
+  $('#gate').style.display='none';$('#drop').style.visibility='';
   if(info.warming){$('#warm').style.display='';setTimeout(boot,3000);return}
   INFO=info;$('#warm').style.display='none';
   pending.forEach(renderUpload);pending=[];
-  setInterval(refresh,1000);
+  if(!boot.ticked){boot.ticked=true;setInterval(refresh,1000)}
 }
 const drop=$('#drop');
 drop.onclick=()=>$('#pick').click();

@@ -38,7 +38,7 @@ h2{font-size:15px;margin:26px 0 2px}
 <div id="drop">Drop files here, or click to choose<input id="pick" type="file" multiple hidden></div>
 <div id="gate" class="card" style="display:none"><span class="name">This Transmute is locked.</span><span class="cat">open the link shown on the computer running Transmute, or paste its access token</span><input id="gatein" type="password" placeholder="access token" style="flex:1 1 200px;background:#1a1a22;color:#e6e6ea;border:1px solid #33333d;border-radius:7px;padding:6px 8px"><button id="gatebtn">Open</button><span id="gateerr" class="why" style="display:none"></span></div>
 <div id="warm" class="why" style="display:none">This machine is still benchmarking itself - the options below appear as soon as it has measured what it can do. You can upload already.</div>
-<h2>Convert</h2><div id="files"></div>
+<h2>Convert <button id="all" style="float:right;padding:3px 10px;font-size:12px" title="queue every uploaded file with the target chosen on its card">Convert all</button></h2><div id="files"></div>
 <h2>Jobs <button id="cancel" style="float:right;padding:3px 10px;font-size:12px">Cancel queued</button></h2>
 <table id="jobs"></table>
 <footer>Files stay on this computer - nothing is sent anywhere. Availability, hardware
@@ -47,6 +47,7 @@ what this machine has measured it can do.</footer>
 <script>
 "use strict";
 let INFO=null, uploads={}, pending=[];
+const cards={};
 const $=s=>document.querySelector(s);
 let TK=sessionStorage.getItem('trtoken')||'';
 {const q=new URLSearchParams(location.search),t=q.get('token');
@@ -133,9 +134,27 @@ function renderUpload(u){
     why.style.display='';
   }
   sync();
+  cards[u.upload_id]={u,sel,enc,qual,why};
   card.append(sel,enc,qual,btn,why);
   $('#files').append(card);
 }
+$('#all').onclick=async()=>{
+  const items=[],byName={};
+  for(const id in cards){const c=cards[id];byName[c.u.name]=c;
+    const body={upload_id:id,target:c.sel.value};
+    if(c.enc.style.display!=='none'&&c.enc.value)body.encoder=c.enc.value;
+    if(c.qual.style.display!=='none')body.quality=+c.qual.value;
+    items.push(body);}
+  if(!items.length){alert('Nothing to convert - drop files first');return}
+  let r;
+  try{r=await j('/api/convert_batch',{method:'POST',
+    headers:{'content-type':'application/json'},body:JSON.stringify({items})})}
+  catch(err){alert('Could not start: '+err.message);return}
+  for(const x of (r.refused||[])){const c=byName[x.name];
+    if(c){c.why.textContent='not queued: '+x.reason;c.why.style.display='';}}
+  if(!r.jobs.length)alert('None of these could convert here - see why on each card');
+  refresh();
+};
 $('#cancel').onclick=()=>j('/api/cancel',{method:'POST'}).then(refresh);
 async function refresh(){
   let jobs;try{jobs=await j('/api/jobs')}catch(e){return}

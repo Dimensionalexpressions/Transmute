@@ -138,6 +138,35 @@ def create_app(state: ServeState | None = None) -> FastAPI:
             raise HTTPException(400, str(exc))
         return {"job_id": job_id}
 
+    @app.post("/api/convert_batch")
+    async def convert_batch(body: dict[str, Any]) -> dict[str, Any]:
+        # folder-at-a-time: every file gets its own verdict; the response
+        # names each refusal and why, and the rest still runs (see core)
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            raise HTTPException(400, "items: a non-empty list is required")
+        cleaned = []
+        for it in items:
+            if not isinstance(it, dict):
+                raise HTTPException(400, "each item must be an object")
+            one: dict[str, Any] = {"upload_id": it.get("upload_id"),
+                                   "target": it.get("target")}
+            for key in ("encoder",):
+                if it.get(key):
+                    one[key] = str(it[key])
+            for key in ("quality", "crf"):
+                if it.get(key) is not None and str(it[key]).strip() != "":
+                    try:
+                        one[key] = int(it[key])
+                    except (TypeError, ValueError):
+                        raise HTTPException(400, f"{key} must be a whole "
+                                                 f"number")
+            cleaned.append(one)
+        try:
+            return st.convert_batch(cleaned)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
     @app.get("/api/jobs")
     def jobs() -> list[dict[str, Any]]:
         return st.jobs()

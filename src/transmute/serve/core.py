@@ -185,29 +185,77 @@ class ServeState:
         return UploadWriter(self, raw_name)
 
     # ------------------------------------------------------------- convert
-    def convert(self, upload_id: str, target: str, **kw: Any) -> str:
-        up = self.uploads.get(upload_id)
-        if up is None:
-            raise LookupError("upload not found - upload the file again")
-        if up.category is None:
-            raise ValueError("not a file type Transmute recognises")
+    def _await_report(self) -> None:
         # capability truth must exist before any verdict; the warm-up thread
         # owns the probe, this request just waits (uploading already bought
         # time - in practice the benchmark finished long ago)
         if not self._report_ready.wait(timeout=300):
-            raise ValueError("this machine is still benchmarking - try again in a moment")
+            raise ValueError("this machine is still benchmarking - "
+                             "try again in a moment")
+
+    def _verdict(self, up: Upload, target: str) -> str | None:
+        """None = this machine will take the job. Anything else is the
+        machine's OWN reason, said out loud - never a silent drop (F3)."""
+        if up.category is None:
+            return "not a file type Transmute recognises"
         rows = {t.target: t for t in self.controller.targets(up.category)}
         if target not in rows:
-            raise ValueError(f"unknown target '{target}' for "
-                             f"{up.category} files")
+            return f"unknown target '{target}' for {up.category} files"
         if not rows[target].available:
-            raise ValueError(rows[target].reason
-                             or "not available on this machine")
+            return rows[target].reason or "not available on this machine"
+        return None
+
+    def convert(self, upload_id: str, target: str, **kw: Any) -> str:
+        up = self.uploads.get(upload_id)
+        if up is None:
+            raise LookupError("upload not found - upload the file again")
+        self._await_report()
+        why = self._verdict(up, target)
+        if why:
+            raise ValueError(why)
         kw = {k: v for k, v in kw.items() if v not in (None, "")}
         info = self.controller.enqueue(up.path, self.outputs_dir,
                                        up.category, target, **kw)
         self.wake()
         return info.job_id
+
+    def convert_batch(self, items: list[dict]) -> dict[str, Any]:
+        """Queue a folder's worth in one breath. Each file gets its own
+        verdict; a refusal never kills the files beside it - the response
+        says exactly which names were refused and why, in this machine's
+        own words. Conversions still run one at a time (the worker owns
+        that promise, not this call)."""
+        if not items:
+            raise ValueError("nothing to convert - upload files first")
+        self._await_report()
+        jobs: list[str] = []
+        refused: list[dict[str, str]] = []
+        for it in items:
+            up = self.uploads.get(str(it.get("upload_id") or ""))
+            target = str(it.get("target") or "")
+            if up is None:
+                refused.append({
+                    "name": str(it.get("upload_id") or "?"),
+                    "reason": "upload not found - upload the file again"})
+                continue
+            if not target:
+                refused.append({"name": up.name, "reason": "target is required"})
+                continue
+            why = self._verdict(up, target)
+            if why:
+                refused.append({"name": up.name, "reason": why})
+                continue
+            kw = {k: v for k, v in it.items()
+                  if k not in ("upload_id", "target") and v not in (None, "")}
+            try:
+                info = self.controller.enqueue(up.path, self.outputs_dir,
+                                               up.category, target, **kw)
+                jobs.append(info.job_id)
+            except Exception as exc:  # noqa: BLE001 - one bad file must
+                refused.append({"name": up.name, "reason": str(exc)})  # not
+        if jobs:
+            self.wake()
+        return {"jobs": jobs, "refused": refused}
 
     # ------------------------------------------------------------- queries
     def info(self) -> dict[str, Any]:

@@ -390,3 +390,34 @@ def test_launcher_reports_a_busy_port(tmp_path):
     finally:
         a.stop()
         b.stop()
+
+
+# ------------------------------------------------------------- batch
+def test_batch_part_success_names_every_refusal(tmp_path):
+    srv = _Server(tmp_path / "batch")
+    try:
+        ids = []
+        for nm in ("a.png", "b.png"):
+            code, up = srv.upload(nm, _png())
+            assert code == 200
+            ids.append(up["upload_id"])
+        code, up = srv.upload("ghost.png", _png())
+        assert code == 200
+        items = [{"upload_id": ids[0], "target": "webp"},
+                 {"upload_id": ids[1], "target": "webp"},
+                 {"upload_id": up["upload_id"], "target": "no-such-target"},
+                 {"upload_id": "missing123", "target": "webp"}]
+        code, res = srv.post_json("/api/convert_batch", {"items": items})
+        assert code == 200
+        assert len(res["jobs"]) == 2                      # good files run
+        refused = {r["name"]: r["reason"] for r in res["refused"]}
+        assert "unknown target" in refused.pop("ghost.png")   # machine's words
+        assert "upload not found" in refused.pop("missing123")
+        assert refused == {}                              # nothing else lied
+        for job in res["jobs"]:
+            srv.wait_done(job)
+            c, blob = srv.get(f"/download/{job}")
+            assert c == 200 and blob[:4] == b"RIFF"       # both really made
+        assert srv.post_json("/api/convert_batch", {"items": []})[0] == 400
+    finally:
+        srv.close()

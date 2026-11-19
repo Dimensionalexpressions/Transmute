@@ -117,8 +117,12 @@ class DocumentEngine:
         with tempfile.TemporaryDirectory(prefix="transmute-lo-", dir=str(dst.parent)) as td:
             outdir = Path(td) / "out"
             profile = Path(td) / "profile"
+            # P6: as_uri() is byte-identical to the old f"file://{profile}" on
+            # Linux and produces file:///C:/... on Windows (a raw backslash
+            # path after file:// parses as host "C" there - LO then ignores
+            # the isolated profile and fights the user's real one).
             res = run_command([lo, "--headless", "--norestore", "--nologo",
-                               f"-env:UserInstallation=file://{profile}",
+                               f"-env:UserInstallation={profile.as_uri()}",
                                "--convert-to", "pdf", "--outdir", outdir, src],
                               timeout_s=timeout_s, log_path=log_path, governor=governor)
             produced = next(iter(sorted(outdir.glob("*.pdf"))), None)
@@ -277,7 +281,7 @@ class DocumentEngine:
             outdir = Path(td) / "out"
             profile = Path(td) / "profile"
             res = run_command([lo, "--headless", "--norestore", "--nologo",
-                               f"-env:UserInstallation=file://{profile}",
+                               f"-env:UserInstallation={profile.as_uri()}",
                                "--convert-to", LO_OUT[target],
                                "--outdir", str(outdir), str(src)],
                               timeout_s=timeout_s, log_path=log_path,

@@ -153,11 +153,7 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate_tree(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:  # pragma: no cover - belt and braces
-            os.killpg(proc.pid, signal.SIGKILL) if hasattr(os, "killpg") else proc.kill()
-            stdout, stderr = proc.communicate()
+        stdout, stderr = drain_bounded(proc, 10)
     finally:
         if slot is not None:
             slot.__exit__(None, None, None)
@@ -179,20 +175,74 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
 
 
 def _terminate_tree(proc: subprocess.Popen) -> None:
-    """SIGINT the whole group (let ffmpeg clean its partial file), then SIGKILL."""
-    try:
-        if sys.platform == "win32":
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+    """SIGINT the whole group (let ffmpeg clean its partial file), then SIGKILL.
+
+    Two traps this avoids (both live-fire on Windows and POSIX benches):
+    - Never look the group id up at kill time: start_new_session=True pins
+      pgid == proc.pid, while os.getpgid() on an exited child can return a
+      REUSED pid's group - you signal a stranger (it found and SIGINTed the
+      pytest process itself).
+    - The direct child exiting does NOT mean the group is dead: POSIX shells
+      start background children with SIGINT ignored (sh's `sleep &` survives
+      INT), and on Windows GUI launchers' helpers (soffice.exe -> soffice.bin)
+      outlive proc.kill() of the direct child. Always escalate: SIGKILL the
+      group / taskkill /T /F the tree; a vanished group is just ESRCH.
+    """
+    if sys.platform == "win32":
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)  # console children, best effort
+        except (OSError, ValueError):
+            pass
         time.sleep(1.5)
+        _win_taskkill_tree(proc.pid)
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            proc.kill()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
     except (ProcessLookupError, PermissionError, OSError):
         pass
-    if proc.poll() is None:
+    time.sleep(1.5)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _win_taskkill_tree(pid: int) -> None:
+    """Kill pid and every descendant. DEVNULL pipes: taskkill spawns nothing,
+    so its own timeout drain can never block."""
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def drain_bounded(proc: subprocess.Popen, grace: float) -> tuple[str, str]:
+    """Collect remaining output after termination, but NEVER block forever.
+
+    A grandchild that survived the kill can keep the pipes open indefinitely
+    (CPython's own subprocess.run(timeout=) hits exactly this on Windows and
+    hangs the caller). When the drain overruns, close our ends and return what
+    we have; a timed-out result is always worth more than a hung app.
+    """
+    try:
+        out, err = proc.communicate(timeout=grace)
+        return (out or "", err or "")
+    except subprocess.TimeoutExpired:
+        pass
+    for fh in (proc.stdout, proc.stderr):
         try:
-            if sys.platform == "win32":
-                proc.kill()
-            else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            proc.kill()
+            if fh:
+                fh.close()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=grace)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return "", ""

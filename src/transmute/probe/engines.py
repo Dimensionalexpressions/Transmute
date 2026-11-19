@@ -181,12 +181,35 @@ def _conventional_dirs() -> list[Path]:
 
 
 def _run_version(path: Path, args: tuple[str, ...], timeout_s: float) -> str:
-    """Return captured combined output; raise on failure/timeout."""
-    proc = subprocess.run(
-        [str(path), *args], capture_output=True, text=True,
-        timeout=timeout_s, encoding="utf-8", errors="replace",
-    )
-    return (proc.stdout or "") + (proc.stderr or "")
+    """Return captured combined output; raise on failure/timeout.
+
+    Deliberately NOT subprocess.run(timeout=): on Windows, CPython's own
+    timeout path re-drains the pipes with no deadline after killing only the
+    direct child - a GUI launcher whose helper child survives (soffice.exe ->
+    soffice.bin) keeps those pipes open and the probe hangs forever. Popen +
+    tree-kill + bounded drain keeps the probe honest on every machine.
+    """
+    from ..engines.base import _terminate_tree, drain_bounded
+    argv = [str(path), *args]
+    popen_kw: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          stdin=subprocess.DEVNULL, text=True,
+                          encoding="utf-8", errors="replace",
+                          # own process group: pins pgid == pid so
+                          # _terminate_tree can kill the whole tree
+                          start_new_session=True)
+    if _IS_WINDOWS:
+        # no console window flashing behind the GUI while probing engines
+        popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    proc = subprocess.Popen(argv, **popen_kw)
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+        return (out or "") + (err or "")
+    except subprocess.TimeoutExpired:
+        _terminate_tree(proc)
+        out, err = drain_bounded(proc, 5)
+        raise subprocess.TimeoutExpired(argv, timeout_s,
+                                        output=(out or "").encode("utf-8", "replace"),
+                                        stderr=(err or "").encode("utf-8", "replace"))
 
 
 class EngineManager:

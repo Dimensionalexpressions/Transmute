@@ -4,11 +4,11 @@ Security, stated plainly:
   * binds to 127.0.0.1 by DEFAULT - only this machine can reach it, and
     no login is asked for: being on this machine already means trusted;
   * anything reachable from OFF this machine (--lan, or --host elsewhere)
-    requires an access token: a real one is generated at startup and
-    printed once as a ready-to-open link. The page hands it back via
-    X-Token header / cookie; wrong or missing => 401. --token pins your
-    own. The token is the only lock - anyone holding the link can make
-    this machine convert files, so treat the link like a Wi-Fi password;
+    requires a password: pick your own with --token, or a strong one is
+    generated at startup and printed once as a ready-to-open link. The page
+    hands it back via X-Token header / cookie; wrong or missing => 401.
+    The password is the only lock - anyone holding it can make this machine
+    convert files, so treat it like a Wi-Fi password;
   * uploads stream to disk with a size cap (default 2 GB, --max-upload-mb);
     filenames are treated as hostile input (see core.safe_name);
   * downloads only resolve job ids recorded in our own journal.
@@ -70,7 +70,7 @@ def create_app(state: ServeState | None = None) -> FastAPI:
         if (st.auth_token and request.url.path != "/"
                 and not st.token_ok(request.headers.get("x-token")
                                     or _cookie(request, "trtoken"))):
-            return JSONResponse({"detail": "access token required - "
+            return JSONResponse({"detail": "password required - "
                                            "open the link shown on the "
                                            "computer running Transmute"},
                                 status_code=401)
@@ -188,6 +188,8 @@ def create_app(state: ServeState | None = None) -> FastAPI:
             return {"cancelled": st.queue.cancel_all()}
         if action == "resume":
             return {"resumed": st.queue.resume_all()}
+        if action == "clear_finished":
+            return {"cleared": st.clear_finished()}
         raise HTTPException(404, "unknown action")
 
     return app

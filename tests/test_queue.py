@@ -276,3 +276,18 @@ def test_unwritable_output_folder_fails_the_job_not_the_run(tmp_path, fixtures):
     r = q.journal.records[rec.job_id]
     assert r.state == "failed"
     assert "cannot prepare output folder" in (r.reason or "")
+
+
+def test_forget_is_a_tombstone_never_a_rewrite(tmp_path, fixtures):
+    from transmute.runner.journal import Journal as _J, JournalRecord as _R
+    jp = tmp_path / "forg.jsonl"
+    j = _J(jp)
+    for k in ("gone-1", "gone-2", "keep-1"):
+        j.append(_R(job_id=k, src=str(fixtures["jpg"]),
+                    dst=str(tmp_path / "x.flac"), category="audio"))
+    assert j.forget(["gone-1", "gone-2", "no-such"]) == 2
+    assert set(j.records) == {"keep-1"}
+    j2 = _J(jp)                         # a replay honours the tombstone
+    assert set(j2.records) == {"keep-1"}
+    # the file is still append-only: forgetting added one line, rewrote none
+    assert len(jp.read_text().splitlines()) == 4

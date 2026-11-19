@@ -25,6 +25,18 @@ class ServeDialog(QDialog):
         for r in (self.rad_off, self.rad_local, self.rad_lan):
             r.toggled.connect(self._apply)
             lay.addWidget(r)
+        prow = QHBoxLayout()
+        prow.addWidget(QLabel("Password (home network):"))
+        self.pw_edit = QLineEdit()
+        self.pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pw_edit.setPlaceholderText(
+            "leave empty and Transmute makes one up, hidden in the link")
+        self.pw_edit.setToolTip(
+            "What other devices must enter before this machine converts\n"
+            "anything for them. Anyone who knows it can use this computer.")
+        self.pw_edit.editingFinished.connect(self._apply)  # Enter applies
+        prow.addWidget(self.pw_edit, stretch=1)
+        lay.addLayout(prow)
         row = QHBoxLayout()
         self.url_edit = QLineEdit()
         self.url_edit.setReadOnly(True)
@@ -41,9 +53,11 @@ class ServeDialog(QDialog):
         note = QLabel(
             "Serving never touches the watch folders: it only converts what "
             "someone uploads, one at a time, results verify before download. "
-            "On the home-network setting the link carries an access token - "
-            "anyone who has that link can use this computer, so share it like "
-            "a Wi-Fi password. Stopping the app stops serving.")
+            "On the home-network setting a password is required - set your "
+            "own above or let Transmute generate one inside the link. Either "
+            "way anyone holding the link or the password can make this "
+            "machine convert, so share it like a Wi-Fi password. Stopping "
+            "the app stops serving.")
         note.setWordWrap(True)
         note.setObjectName("muted")  # colored by theme.qss (QLabel#muted)
         lay.addWidget(note)
@@ -53,6 +67,8 @@ class ServeDialog(QDialog):
         self._ready = True  # setChecked storms above must not start servers
 
     def _apply(self) -> None:
+        # a password only means something when other machines can arrive
+        self.pw_edit.setEnabled(self.rad_lan.isChecked())
         # toggling one radio off checks the next: two signals, one decision
         if not getattr(self, "_ready", False) or getattr(self, "_queued", False):
             return
@@ -63,14 +79,21 @@ class ServeDialog(QDialog):
         self._queued = False
         mode = ("lan" if self.rad_lan.isChecked() else
                 "local" if self.rad_local.isChecked() else "off")
-        if mode == self.ln.mode and mode != "off":
+        pw = self.pw_edit.text().strip() if mode == "lan" else ""
+        # a typed password replaces the running one; anything else already
+        # running keeps its lock (a generated key is not something one
+        # retypes, so an empty box means 'leave the running server alone')
+        restart_new_pw = bool(pw) and pw != (self.ln.token or "")
+        if mode == self.ln.mode and mode != "off" and not restart_new_pw:
             self._show(self.ln.status())
             return
         try:
             if mode == "off":
                 self.ln.stop()
             else:
-                self._show(self.ln.start(mode))
+                if restart_new_pw and self.ln.running:
+                    self.ln.stop()  # the running server holds the old key
+                self._show(self.ln.start(mode, token=pw or None))
             self._show(self.ln.status())
         except Exception as exc:  # noqa: BLE001 - dialog must not explode
             self.lbl.setText(f"could not start: {exc}")

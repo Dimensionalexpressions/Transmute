@@ -30,10 +30,10 @@ class _StubLauncher:
     def running(self) -> bool:
         return self.mode != "off"
 
-    def start(self, mode, port=8765, max_upload_mb=2048.0):
+    def start(self, mode, port=8765, max_upload_mb=2048.0, token=None):
         self.calls.append(mode)
         self.mode = mode
-        self.token = "tok123tok123" if mode == "lan" else None
+        self.token = token or ("tok123tok123" if mode == "lan" else None)
         self.url = "http://127.0.0.1:8765/" + (f"?token={self.token}"
                                                if self.token else "")
         return self.status()
@@ -108,3 +108,47 @@ def test_closing_the_app_closes_the_door(qapp, tmp_path, monkeypatch):
         assert win.serve.status()["mode"] == "off"      # window closed = door
     finally:
         win.serve.stop()                                # idempotent
+
+
+def test_password_field_only_governs_the_home_network(qapp):
+    from transmute.gui.serve_dialog import ServeDialog
+    ln = _StubLauncher()
+    dlg = ServeDialog(ln)
+    qapp.processEvents()
+    assert not dlg.pw_edit.isEnabled()          # nothing to protect when off
+    dlg.pw_edit.setText("hunter2 secret")
+    dlg.rad_lan.setChecked(True)
+    qapp.processEvents()
+    assert ln.calls == ["lan"]
+    assert ln.token == "hunter2 secret"         # the operator's word wins
+    assert dlg.pw_edit.isEnabled()
+    dlg.rad_off.setChecked(True)
+    qapp.processEvents()
+    assert ln.calls == ["lan", "off"]
+
+
+def test_typed_password_replaces_a_running_generated_one(qapp):
+    from transmute.gui.serve_dialog import ServeDialog
+    ln = _StubLauncher()
+    dlg = ServeDialog(ln)
+    qapp.processEvents()
+    dlg.rad_lan.setChecked(True)
+    qapp.processEvents()
+    assert ln.token == "tok123tok123"           # generated: box left empty
+    dlg.pw_edit.setText("hunter2")
+    dlg.pw_edit.editingFinished.emit()          # Enter applies
+    qapp.processEvents()
+    assert ln.calls == ["lan", "off", "lan"]    # the old key dies with it
+    assert ln.token == "hunter2"
+
+
+def test_empty_password_box_leaves_a_running_server_alone(qapp):
+    from transmute.gui.serve_dialog import ServeDialog
+    ln = _StubLauncher()
+    ln.start("lan")
+    dlg = ServeDialog(ln)
+    qapp.processEvents()
+    dlg.pw_edit.editingFinished.emit()          # focus-out on an empty box
+    qapp.processEvents()
+    assert ln.calls == ["lan"]                  # no accidental restart:
+    assert ln.token == "tok123tok123"           # the link stays valid

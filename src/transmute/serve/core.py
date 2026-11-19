@@ -311,6 +311,28 @@ class ServeState:
             raise LookupError("output file is gone")
         return dst
 
+    def clear_finished(self) -> int:
+        """The web 'Clear finished' button: forget terminal rows and delete
+        the outputs this service produced for them. Live rows stay; uploaded
+        sources stay (they are the client's copies, and deleting user
+        content was never what 'clear the list' means)."""
+        ids, dsts = [], []
+        for rec in self.journal.records.values():
+            if rec.terminal:
+                ids.append(rec.job_id)
+                dsts.append(Path(rec.dst))
+        # delete only files the journal says we authored under outputs_dir
+        for dst in dsts:
+            if self.outputs_dir in dst.parents:
+                try:
+                    dst.unlink(missing_ok=True)
+                except OSError:
+                    pass  # a vanished output must never block the clear
+        n = self.journal.forget(ids)
+        if n:
+            self.events.append("jobs_forgotten", cleared=n)
+        return n
+
     # ------------------------------------------------------------- worker
     def wake(self) -> None:
         self._wake.set()

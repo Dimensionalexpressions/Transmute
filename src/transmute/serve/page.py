@@ -36,10 +36,10 @@ h2{font-size:15px;margin:26px 0 2px}
 <h1>Transmute</h1>
 <div class="sub">Drop a file - the conversion runs on this machine and the result comes back to you. Max upload: {{ '%.0f' % max_upload_mb }} MB.</div>
 <div id="drop">Drop files here, or click to choose<input id="pick" type="file" multiple hidden></div>
-<div id="gate" class="card" style="display:none"><span class="name">This Transmute is locked.</span><span class="cat">open the link shown on the computer running Transmute, or paste its access token</span><input id="gatein" type="password" placeholder="access token" style="flex:1 1 200px;background:#1a1a22;color:#e6e6ea;border:1px solid #33333d;border-radius:7px;padding:6px 8px"><button id="gatebtn">Open</button><span id="gateerr" class="why" style="display:none"></span></div>
+<div id="gate" class="card" style="display:none"><span class="name">This Transmute is locked.</span><span class="cat">open the link shown on the computer running Transmute, or enter the password it shows there</span><input id="gatein" type="password" placeholder="password" style="flex:1 1 200px;background:#1a1a22;color:#e6e6ea;border:1px solid #33333d;border-radius:7px;padding:6px 8px"><button id="gatebtn">Open</button><span id="gateerr" class="why" style="display:none"></span></div>
 <div id="warm" class="why" style="display:none">This machine is still benchmarking itself - the options below appear as soon as it has measured what it can do. You can upload already.</div>
 <h2>Convert <button id="all" style="float:right;padding:3px 10px;font-size:12px" title="queue every uploaded file with the target chosen on its card">Convert all</button></h2><div id="files"></div>
-<h2>Jobs <button id="cancel" style="float:right;padding:3px 10px;font-size:12px">Cancel queued</button></h2>
+<h2>Jobs <button id="cancel" style="float:right;padding:3px 10px;font-size:12px">Cancel queued</button><button id="clearfin" style="float:right;padding:3px 10px;font-size:12px;margin-right:8px">Clear finished</button></h2>
 <table id="jobs"></table>
 <footer>Files stay on this computer - nothing is sent anywhere. Availability, hardware
 badges and reasons come from this machine's own benchmark, so what you can pick is
@@ -66,7 +66,7 @@ $('#gatein').onkeydown=e=>{if(e.key==='Enter')$('#gatebtn').click()};
 async function boot(){
   let info;
   try{info=await j('/api/info')}
-  catch(err){if(String(err.message).includes('token')){askToken();return}throw err}
+  catch(err){if(String(err.message).includes('required')){askToken();return}throw err}
   $('#gate').style.display='none';$('#drop').style.visibility='';
   if(info.warming){$('#warm').style.display='';setTimeout(boot,3000);return}
   INFO=info;$('#warm').style.display='none';
@@ -156,6 +156,7 @@ $('#all').onclick=async()=>{
   refresh();
 };
 $('#cancel').onclick=()=>j('/api/cancel',{method:'POST'}).then(refresh);
+$('#clearfin').onclick=()=>j('/api/clear_finished',{method:'POST'}).then(refresh);
 async function refresh(){
   let jobs;try{jobs=await j('/api/jobs')}catch(e){return}
   const tb=$('#jobs');tb.innerHTML='';

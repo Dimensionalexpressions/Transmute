@@ -69,6 +69,13 @@ class Journal:
     def load(self) -> dict[str, JournalRecord]:
         self.records = {}
         for rec in read_jsonl(self.path):
+            forgotten = rec.get("forget")
+            if forgotten:
+                # tombstone line: these jobs' earlier lines are void from
+                # here on - the file stays append-only even when forgetting
+                for jid in forgotten:
+                    self.records.pop(jid, None)
+                continue
             state = rec.get("state")
             job_id = rec.get("job_id")
             if not job_id or state not in STATES:
@@ -113,6 +120,20 @@ class Journal:
             if hasattr(rec, k):
                 setattr(rec, k, v)
         return self.append(rec, state=state)
+
+    def forget(self, job_ids) -> int:
+        """Drop TERMINAL rows from this journal for good. The file stays
+        append-only: the drop itself is recorded as one tombstone line, so
+        replays keep the rows gone. This is for SERVE's 'Clear finished'
+        (a web job list nobody subscribes to as history); the desktop
+        journal is an audit trail and must never call this."""
+        ids = [j for j in job_ids if j in self.records]
+        if not ids:
+            return 0
+        self._writer.append("journal", forget=ids, updated=time.time())
+        for j in ids:
+            self.records.pop(j, None)
+        return len(ids)
 
     # ------------------------------------------------------------- queries
     def pending(self, *, now: float | None = None) -> list[JournalRecord]:

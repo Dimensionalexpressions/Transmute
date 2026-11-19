@@ -2,8 +2,9 @@
 
 The GUI dialog is a few labels around this class; the class is testable
 headless (it's the same uvicorn-in-a-thread the tests already run).
-Modes: 'off' | 'local' (127.0.0.1, no token - being here IS the trust)
-| 'lan' (0.0.0.0 + generated access token, link shown for the phone).
+Modes: 'off' | 'local' (127.0.0.1, no login - being here IS the trust)
+| 'lan' (0.0.0.0 + a password: operator-chosen or generated; the link
+shown for the phone carries it, so a device can open it without typing).
 """
 from __future__ import annotations
 
@@ -47,7 +48,8 @@ class ServeLauncher:
                     and self.mode != "off")
 
     def start(self, mode: str, port: int = 8765,
-              max_upload_mb: float = 2048.0) -> dict[str, Any]:
+              max_upload_mb: float = 2048.0,
+              token: str | None = None) -> dict[str, Any]:
         if mode == self.mode and self.running:
             return self.status()
         self.stop()
@@ -56,7 +58,13 @@ class ServeLauncher:
         import uvicorn
         from .app import create_app
         host = "127.0.0.1" if mode == "local" else "0.0.0.0"
-        token = secrets.token_urlsafe(18) if mode == "lan" else None
+        given = (token or "").strip()
+        if mode == "lan":
+            # the operator's chosen password wins; nothing on the LAN is
+            # ever served unlocked, so an empty box means "generate one"
+            token = given or secrets.token_urlsafe(18)
+        else:
+            token = None
         # A server is somebody else's invitation to load this machine:
         # uploads convert under the throttle (CPU cap, low IO priority,
         # capped GPU sessions) unless the operator opted out with
@@ -115,7 +123,9 @@ class ServeLauncher:
         self._srv, self._thread, self._st = srv, thread, st
         self._gov = gov
         self.mode, self.error, self.token = mode, None, token
-        self.url = f"http://{shown}:{real}/" + (f"?token={token}"
+        # quote it: a chosen password may contain spaces or '&'
+        from urllib.parse import quote
+        self.url = f"http://{shown}:{real}/" + (f"?token={quote(token, safe='')}"
                                                 if token else "")
         return self.status()
 

@@ -501,3 +501,70 @@ def test_duplicate_names_refusal_attaches_to_the_right_upload(tmp_path):
             srv.wait_done(job)
     finally:
         srv.close()
+
+
+# ------------------------------------------------- clear finished
+def test_clear_finished_forgets_rows_and_frees_outputs(server):
+    code, up = server.upload("a.png", _png())
+    assert code == 200
+    code, res = server.post_json(
+        "/api/convert", {"upload_id": up["upload_id"], "target": "webp"})
+    assert code == 200
+    job = res["job_id"]
+    server.wait_done(job)
+    dst = Path(server.state.journal.records[job].dst)
+    assert dst.is_file()
+    # a queued row is NOT finished: it must survive a neighbour's clear
+    from transmute.runner.journal import Journal, JournalRecord
+    server.state.journal.append(JournalRecord(
+        job_id="stay-queued", src="/x/keep.png",
+        dst=str(server.state.outputs_dir / "keep.webp"), category="image"))
+    code, got = server.post_json("/api/clear_finished", {})
+    assert code == 200 and got["cleared"] == 1
+    assert not dst.exists()                    # output space is freed
+    assert server.get(f"/download/{job}")[0] == 404
+    assert [k["state"] for k in server.state.jobs()] == ["queued"]
+    # the forgetting survives a serve restart: tombstone lines replay gone
+    j2 = Journal(server.state.journal.path)
+    assert [r.job_id for r in j2.records.values()] == ["stay-queued"]
+    # and an already-clean list answers honestly, not with an error
+    assert server.post_json("/api/clear_finished", {})[1] == {"cleared": 0}
+
+
+def test_clear_finished_needs_the_password_too(tmp_path):
+    srv = _Server(tmp_path / "cf", auth_token="sekret")
+    try:
+        assert srv.post_json("/api/clear_finished", {})[0] == 401
+        code, got = srv.post_json("/api/clear_finished", {}, tok="sekret")
+        assert code == 200 and got == {"cleared": 0}
+    finally:
+        srv.close()
+
+
+def test_launcher_operator_password_instead_of_a_generated_one(tmp_path):
+    from urllib.parse import urlparse
+    from transmute.serve.launcher import ServeLauncher
+
+    def factory(**kw):
+        return ServeState(paths=AppPaths(tmp_path / "pw"),
+                          report_provider=_report, **kw)
+
+    ln = ServeLauncher(state_factory=factory)
+    try:
+        st = ln.start("lan", port=0, token="hunter2 here")
+        assert st["token"] == "hunter2 here"
+        # the shown link carries it URL-quoted, so it still just works
+        assert "hunter2%20here" in st["url"]
+        port = urlparse(st["url"]).port
+        url = f"http://127.0.0.1:{port}/api/info"
+        req = urllib.request.Request(url, headers={"X-Token": "hunter2"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("a prefix of the password was accepted")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401             # all of it or nothing
+        req = urllib.request.Request(url, headers={"X-Token": "hunter2 here"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+    finally:
+        ln.stop()

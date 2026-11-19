@@ -185,6 +185,17 @@ def test_ghost_running_replays_as_interrupted_then_discard(tmp_path, fixtures):
     assert j.records["ghost-1"].state == "abandoned"
 
 
+def test_discard_refuses_ids_the_worker_owns(tmp_path, fixtures):
+    # a GUI row can be stale by the time a click lands; the journal is the
+    # second lock: an in-flight record is never abandoned by id, whatever
+    # the caller thought its state was.
+    q = _queue(tmp_path, engine=None)
+    jid = q.add(fixtures["jpg"], tmp_path / "y.flac", category="image").job_id
+    q.journal.transition(q.journal.records[jid], "running")
+    assert q.discard([jid]) == 0
+    assert q.journal.records[jid].state == "running"
+
+
 def test_torn_journal_line_tolerated(tmp_path, fixtures):
     jp = tmp_path / "journal.jsonl"
     jp.write_text(json.dumps({

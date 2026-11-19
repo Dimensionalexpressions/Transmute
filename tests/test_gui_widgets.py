@@ -589,6 +589,81 @@ class TestQueueControlsP5:
         assert all(win.table.item(i, 2).text() == "abandoned" for i in range(2))
         assert "Cancelled 2" in win.lbl_status.text()
 
+    def test_discard_selected_abandons_only_the_selection(self, qwin):
+        win, jq = qwin
+        ids = list(jq.journal.records)
+        win.refresh_queue()                          # fixture added jobs after build
+        win.table.selectRow(0)
+        win.btn_discard.click()
+        recs = jq.journal.records
+        assert recs[ids[0]].state == "abandoned"
+        assert recs[ids[0]].reason == "discarded by user"
+        assert recs[ids[1]].state == "queued"       # sibling untouched
+        # the table shows the truth, and the source file is NOT deleted
+        assert win.table.item(0, 2).text() == "abandoned"
+        assert win.table.item(1, 2).text() == "queued"
+        assert "Discarded 1 job(s) — source files untouched." in \
+            win.lbl_status.text()
+
+    def test_discard_leaves_in_flight_rows_alone(self, qwin):
+        win, jq = qwin
+        rec = next(iter(jq.journal.records.values()))
+        jq.journal.transition(rec, "running")       # worker owns this one
+        win.refresh_queue()                          # table re-syncs to truth
+        win.table.selectAll()
+        win.btn_discard.click()
+        assert rec.state == "running"               # GUI refused to touch it
+        other = [r for r in jq.journal.records.values() if r is not rec]
+        assert all(r.state == "abandoned" for r in other)
+        assert "left as they were" in win.lbl_status.text()
+
+    def test_discard_without_selection_says_so(self, qwin):
+        win, jq = qwin
+        win.btn_discard.click()
+        assert all(r.state == "queued" for r in jq.journal.records.values())
+        assert "Select row(s) to discard" in win.lbl_status.text()
+
+
+class TestProbeCaveatsVisible:
+    """Machine-wide probe caveats (probe/capability.py) must reach the GUI
+    VERBATIM — the doctrine that no machine-level limitation is silent.
+    The chip appears only while the machine actually reports something."""
+
+    @staticmethod
+    def _window_with_caveats(caveats):
+        from transmute.gui.app import MainWindow
+        from test_gui_controller import _report
+        rep = _report()
+        rep.caveats = list(caveats)
+        ctrl = ConverterController(report_provider=lambda: rep)
+        ctrl._report = rep
+        return MainWindow(controller=ctrl), rep
+
+    def test_caveats_render_verbatim(self, qapp):
+        cav = ["ffmpeg not found: no codec capability can be probed; "
+               "every conversion row explains itself.",
+               "GPU probing disabled by TRANSMUTE_DISABLE_GPU."]
+        win, _ = self._window_with_caveats(cav)
+        try:
+            assert win.lbl_caveats.text().splitlines() == cav  # word-for-word
+            assert win.lbl_caveats.isVisibleTo(win)
+        finally:
+            win.close()
+
+    def test_empty_caveats_hides_the_chip(self, qapp):
+        win, rep = self._window_with_caveats([])
+        try:
+            assert not win.lbl_caveats.isVisibleTo(win)
+            assert win.lbl_caveats.text() == ""
+            # and it appears the moment a later probe reports something
+            rep.caveats = ["ffmpeg -encoders failed; capability report is "
+                           "partial."]
+            win._refresh_caveats()
+            assert win.lbl_caveats.isVisibleTo(win)
+            assert "partial" in win.lbl_caveats.text()
+        finally:
+            win.close()
+
 
 class TestAdaptivePanel:
     """Live-user rule: the panel adapts to the selection - audio must not

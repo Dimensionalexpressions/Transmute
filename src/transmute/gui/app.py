@@ -429,6 +429,16 @@ class MainWindow(QMainWindow):
         # end calls _update_decode_line); now that the row does exist, show
         # what the boot probe measured - the line must never boot invisible
         self._update_decode_line()
+        # Machine-wide probe caveats (no ffmpeg, partial probe, GPU trial
+        # refused...) - the doctrine says every reason the machine itself
+        # reports stays VISIBLE, verbatim, not buried in a log.
+        self.lbl_caveats = QLabel("")
+        self.lbl_caveats.setWordWrap(True)
+        self.lbl_caveats.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_caveats.setStyleSheet(theme.chip(self._P, "warn"))
+        self.lbl_caveats.hide()
+        mform.addRow(self.lbl_caveats)
+        self._refresh_caveats()
         rv.addRow(more)
         qlrow = QHBoxLayout()
         self.rad_crf = QRadioButton("Quality (CRF)")
@@ -588,6 +598,13 @@ class MainWindow(QMainWindow):
             "Abandon everything not yet started (visible in the table as\n"
             "'cancelled by user'). Jobs already running finish normally.")
         self.btn_cancel.clicked.connect(self._cancel_pending)
+        # per-row version (user asked): abandon just the selected stopped rows
+        self.btn_discard = QPushButton("Discard selected")
+        self.btn_discard.setToolTip(
+            "Abandon the selected rows that are stopped (queued, paused,\n"
+            "interrupted, failed). Running and finished rows are untouched.\n"
+            "Source files are never deleted.")
+        self.btn_discard.clicked.connect(self._discard_selected)
         self.bar = QProgressBar()
         self.bar.setRange(0, 0)
         self.bar.setVisible(False)
@@ -596,6 +613,7 @@ class MainWindow(QMainWindow):
         ctl.addWidget(self.btn_pause)
         ctl.addWidget(self.btn_resume)
         ctl.addWidget(self.btn_cancel)
+        ctl.addWidget(self.btn_discard)
         ctl.addWidget(self.bar)
         ctl.addWidget(self.lbl_status, stretch=1)
         bv.addLayout(ctl)
@@ -1099,6 +1117,7 @@ class MainWindow(QMainWindow):
         # the details box stays EMPTY after benchmarking (user-reported).
         self._load_encoders(0)
         self._load_devices()  # names/reasons re-sync to the NEW report
+        self._refresh_caveats()  # machine caveats follow the NEW report too
 
     def _update_about(self) -> None:
         """Details block: what the chosen target means in plain words + the
@@ -1504,7 +1523,11 @@ class MainWindow(QMainWindow):
         done = sum(1 for r in rows if not r.live)
         for i, r in enumerate(rows):
             src = Path(r.src).name
-            self.table.setItem(i, 0, QTableWidgetItem(src))
+            it_src = QTableWidgetItem(src)
+            # journal id rides as data: row actions (discard) address the job,
+            # never a name the user could have renamed on disk meanwhile
+            it_src.setData(Qt.ItemDataRole.UserRole, r.job_id)
+            self.table.setItem(i, 0, it_src)
             self.table.setItem(i, 1, QTableWidgetItem(Path(r.dst).name))
             st = QTableWidgetItem(r.state)
             self.table.setItem(i, 2, st)
@@ -1540,6 +1563,49 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(
             f"Cancelled {n} job(s) (shown as cancelled by user) — in-flight "
             f"jobs still finish.")
+
+    # states a user may abandon per-row: everything that is NOT in flight and
+    # not already settled ("running"/"verifying" belong to the worker; the
+    # journal refuses them there too as a second lock).
+    _DISCARDABLE = ("queued", "paused", "failed", "interrupted")
+
+    def _discard_selected(self) -> None:
+        ids: list[str] = []
+        held = 0
+        for row in sorted({idx.row() for idx in self.table.selectedIndexes()}):
+            it_id, it_st = self.table.item(row, 0), self.table.item(row, 2)
+            if not it_id or not it_st:
+                continue
+            if it_st.text() in self._DISCARDABLE:
+                ids.append(it_id.data(Qt.ItemDataRole.UserRole))
+            else:
+                held += 1
+        if not ids:
+            self.lbl_status.setText(
+                f"Nothing to discard selected — running and finished rows "
+                f"stay." if held else "Select row(s) to discard first.")
+            return
+        n = self.ctrl.queue.discard(ids)
+        self.refresh_queue()
+        msg = f"Discarded {n} job(s) — source files untouched."
+        if held:
+            msg += f" {held} running/finished row(s) left as they were."
+        self.lbl_status.setText(msg)
+
+    def _refresh_caveats(self) -> None:
+        """Show the machine's own probe caveats verbatim (doctrine: no
+        silent hardware assumptions — reasons stay visible, nothing added,
+        nothing reworded)."""
+        try:
+            cav = [str(c) for c in (self.ctrl.report.caveats or [])]
+        except Exception:  # noqa: BLE001 - report unreadable: leave chip as-is
+            return
+        if cav:
+            self.lbl_caveats.setText("\n".join(cav))
+            self.lbl_caveats.show()
+        else:
+            self.lbl_caveats.clear()
+            self.lbl_caveats.hide()
 
     # --------------------------------------------------------- watch folders
     def _watch_add_dialog(self) -> None:

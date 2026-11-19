@@ -131,11 +131,18 @@ class JobQueue:
         self._stop.set()
 
     def discard(self, job_ids: list[str] | None = None) -> int:
-        """Explicit 'discard' for interrupted runs (F19): abandons the jobs."""
+        """Explicit 'discard' for interrupted runs (F19): abandons the jobs.
+
+        A record the worker is actively running/verifying is never abandoned
+        here even when its id is passed - its output may be mid-replace, and
+        an 'abandoned' row whose file then lands would be a lie. The GUI
+        hides those rows from the button; the journal refuses them too."""
         targets = ([self.journal.records[j] for j in job_ids if j in self.journal.records]
                    if job_ids else self.journal.resumable())
         n = 0
         for rec in targets:
+            if rec.state in ("running", "verifying"):
+                continue
             if not rec.terminal:
                 self.journal.transition(rec, "abandoned", reason="discarded by user")
                 self.events.append("job_discarded", job_id=rec.job_id)

@@ -10,10 +10,10 @@
         nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
       # Version is read from pyproject.toml so the two never drift apart.
-      version = builtins.head (builtins.map
-        (nixpkgs.lib.flip builtins.match ''version = "\([^"]*\)" '')
+      version = builtins.head (builtins.head (builtins.map
+        (line: builtins.match "version = \"([0-9.]+)\"" line)
         (builtins.filter (nixpkgs.lib.hasPrefix "version = ")
-          (nixpkgs.lib.splitString "\n" (builtins.readFile ./pyproject.toml))));
+          (nixpkgs.lib.splitString "\n" (builtins.readFile ./pyproject.toml)))));
 
       cleanSource = nixpkgs.lib.cleanSourceWith {
         src = nixpkgs.lib.cleanSource ./.;
@@ -39,7 +39,7 @@
             pyside6 fastapi uvicorn jinja2 python-multipart
             pip setuptools wheel build
           ]);
-        in pkgs.buildPythonApplication {
+        in pkgs.python3.pkgs.buildPythonApplication {
           pname = "transmute";
           inherit version;
           format = "pyproject";
@@ -51,7 +51,15 @@
           dontWrapPythonPrograms = true;
           doCheck = false; # suite needs real engines + offscreen Qt; run via devShell / CI
 
-          nativeBuildInputs = with pkgs; [ makeWrapper pkgs.qt6.wrapQtAppsHook pep517 ];
+          nativeBuildInputs = with pkgs; [
+            makeWrapper qt6.wrapQtAppsHook
+            # pypaBuildPhase runs `build --no-isolation`; the setuptools/wheel
+            # backend must be importable by the build tool itself.
+            python3Packages.pep517 python3Packages.setuptools python3Packages.wheel
+          ];
+          # wrapQtAppsHook needs a host Qt (sets qtPluginPrefix) to wrap the
+          # GUI launcher against; qtsvg supplies the SVG image plugins.
+          buildInputs = with pkgs; [ qt6.qtbase qt6.qtsvg ];
           propagatedBuildInputs = with pkgs.python3Packages; [
             pillow pikepdf psutil platformdirs watchdog
             pyside6 fastapi uvicorn jinja2 python-multipart
@@ -106,10 +114,10 @@
             ];
             shellHook = ''
               export PYTHONPATH=$PWD/src
-              export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+              export QT_QPA_PLATFORM="''${QT_QPA_PLATFORM:-offscreen}"
               export TRANSMUTE_DISABLE_GPU=1
               # Nix-built Qt keeps plugins under lib/qt6/plugins (multi-out).
-              export QT_PLUGIN_PATH="$(ls -d ${pkgs.qt6.qtbase}/lib*/qt6/plugins 2>/dev/null || true)${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+              export QT_PLUGIN_PATH="$(ls -d ${pkgs.qt6.qtbase}/lib*/qt6/plugins 2>/dev/null || true)''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
             '';
           };
         });

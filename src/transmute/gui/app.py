@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
         self._watch_rules: list[tuple[Path, Path]] = []
         self._watch_events: pyqueue.SimpleQueue[str] = pyqueue.SimpleQueue()
         self._watch_more = False                 # watch jobs await a worker
+        self._watch_missing: set[tuple[str, str]] = set()  # saved but not here
         self.run_done.connect(self._on_worker_done)
         self.reprobe_done.connect(self._on_reprobe_done)
         self.bench_note.connect(self._on_bench_note)
@@ -180,6 +181,9 @@ class MainWindow(QMainWindow):
         self._wpoll.timeout.connect(self._drain_watch)
         self._wpoll.start()
         self.refresh_queue()
+        # watch folders are a standing arrangement, not a per-session wish:
+        # saved rules re-arm their watcher now that every widget exists
+        self._restore_watch_folders()
 
     # ------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -1509,24 +1513,92 @@ class MainWindow(QMainWindow):
         self._watch_add(Path(src), Path(dst))
 
     def _watch_add(self, src: Path, dst: Path) -> None:
+        key = (str(src), str(dst))
+        if (src, dst) in self._watch_rules:
+            if key not in self._watch_missing:
+                self.lbl_watch.setText("⚠ already watching that folder")
+                return
+            # the drive this saved rule lives on is back: re-arming the SAME
+            # rule (never a silent edit) resumes watching it
+            err = self._watch_attach(src, dst)
+            if err:
+                self.lbl_watch.setText("⚠ " + err)
+                return
+            self._watch_missing.discard(key)
+            self._sync_watch_list()
+            self.lbl_watch.setText(
+                f"resumed {src} — watching "
+                f"{len(self._watch_rules) - len(self._watch_missing)} "
+                "folder(s)")
+            return
+        err = self._watch_attach(src, dst)
+        if err:
+            # honest refusal (dst==src, nested trees, not a dir): say it, keep
+            # the existing watcher running (F3)
+            self.lbl_watch.setText("⚠ " + err)
+            return
+        self._watch_rules.append((src, dst))
+        self._persist_watch_rules()
+        self._sync_watch_list()
+        self.lbl_watch.setText(
+            f"watching {len(self._watch_rules)} folder(s) — drops are queued "
+            "and converted automatically with default quality")
+
+    def _watch_attach(self, src: Path, dst: Path) -> str | None:
+        """Arm one rule on the live watcher, starting it if none runs yet.
+        Returns the refusal text, or None on success. F3: a rejected rule
+        must not leave a dead watcher - the instance is assigned only once
+        fully valid. OSError too: a failed inotify arm must never kill the
+        app at startup."""
         try:
             if self._watcher is None:
                 w = self._new_watcher()
                 w.add_folder(src, dst)  # schedule BEFORE start (live API)
                 w.start()
-                self._watcher = w  # assign only once fully valid (F3: a
-            else:                  # rejected rule must not leave a dead watcher)
+                self._watcher = w
+            else:
                 self._watcher.add_folder(src, dst)  # live-scheduled
-            self._watch_rules.append((src, dst))
-        except (ValueError, RuntimeError) as exc:
-            # honest refusal (dst==src, nested trees, not a dir): say it, keep
-            # the existing watcher running (F3)
-            self.lbl_watch.setText("⚠ " + str(exc))
+        except (ValueError, RuntimeError, OSError) as exc:
+            return str(exc)
+        return None
+
+    def _persist_watch_rules(self) -> None:
+        # prefs schema: list of [src, dst] string pairs (JSON-safe, shared
+        # with any future headless reader of the same file)
+        self.ctrl.set_pref("watch_folders",
+                           [[str(s), str(d)] for s, d in self._watch_rules])
+
+    def _restore_watch_folders(self) -> None:
+        """Re-arm saved watch rules at startup. A folder that is not here
+        right now (unplugged drive) stays LISTED with a marker and stays in
+        prefs — nothing is silently dropped; picking the same folder again
+        after remounting resumes exactly that rule."""
+        saved: list[tuple[str, str]] = []
+        raw = self.ctrl.prefs().get("watch_folders", [])
+        for item in raw if isinstance(raw, list) else []:
+            if (isinstance(item, (list, tuple)) and len(item) == 2
+                    and all(isinstance(x, str) and x.strip() for x in item)):
+                pair = (str(Path(item[0])), str(Path(item[1])))
+                if pair not in saved:
+                    saved.append(pair)
+        missing = 0
+        for src_s, dst_s in saved:
+            self._watch_rules.append((Path(src_s), Path(dst_s)))
+            if self._watch_attach(Path(src_s), Path(dst_s)):
+                self._watch_missing.add((src_s, dst_s))
+                missing += 1
+        if not saved:
             return
         self._sync_watch_list()
-        self.lbl_watch.setText(
-            f"watching {len(self._watch_rules)} folder(s) — drops are queued "
-            "and converted automatically with default quality")
+        if missing:
+            self.lbl_watch.setText(
+                f"⚠ {missing} saved folder(s) are not here right now "
+                "(unplugged drive?) — the rest are watching; pick the same "
+                "folder again to resume one")
+        else:
+            self.lbl_watch.setText(
+                f"watching {len(self._watch_rules)} folder(s) — resumed from "
+                "last session")
 
     def _new_watcher(self):
         from ..watch import FolderWatcher
@@ -1541,7 +1613,9 @@ class MainWindow(QMainWindow):
         row = self.watch_list.currentRow()
         if row < 0 or row >= len(self._watch_rules):
             return
-        self._watch_rules.pop(row)
+        src, dst = self._watch_rules.pop(row)
+        self._watch_missing.discard((str(src), str(dst)))
+        self._persist_watch_rules()
         old, self._watcher = self._watcher, None
         if old is not None:
             old.stop()
@@ -1549,10 +1623,18 @@ class MainWindow(QMainWindow):
         # rules (cheap: folders only, no state to lose - jobs are journalled)
         if self._watch_rules:
             w = self._new_watcher()
+            armed = 0
             for src, dst in self._watch_rules:
-                w.add_folder(src, dst)  # same rules already validated once
-            w.start()
-            self._watcher = w
+                try:
+                    w.add_folder(src, dst)
+                    armed += 1
+                except (ValueError, RuntimeError, OSError):
+                    # a rule that was already missing stays missing; removing
+                    # another folder must not drop it or kill the rebuild
+                    self._watch_missing.add((str(src), str(dst)))
+            if armed:
+                w.start()
+                self._watcher = w
         self._sync_watch_list()
         self.lbl_watch.setText(
             f"watching {len(self._watch_rules)} folder(s)" if self._watch_rules
@@ -1561,7 +1643,10 @@ class MainWindow(QMainWindow):
     def _sync_watch_list(self) -> None:
         self.watch_list.clear()
         for src, dst in self._watch_rules:
-            self.watch_list.addItem(f"{src}  →  {dst}")
+            line = f"{src}  →  {dst}"
+            if (str(src), str(dst)) in self._watch_missing:
+                line += "   (folder missing)"
+            self.watch_list.addItem(line)
 
     def _drain_watch(self) -> None:
         lines = []

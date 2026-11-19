@@ -472,8 +472,10 @@ measured), but "written" is not "proven on Windows".
 - Deep PDF (ghostscript) is lossy — only on explicit opt-in, and the GUI
   checkbox is labelled "Deep PDF pass (LOSSY recompress)" (P2 ✅).
 - F24 watch folders: core + CLI shipped in P4 (tests + live smoke green);
-  the GUI watch-settings panel is NOT built — drops land in the queue only
-  via `python -m transmute.watch`. GUI polish + packaging are P5/P7/P8.
+  the GUI watch panel shipped in P7, and its rules now PERSIST: saved
+  folders re-arm their watcher at startup, an unplugged drive's rule stays
+  listed marked "(folder missing)" and resumes when re-picked after remount.
+  GUI polish + packaging are P5/P7/P8.
   LICENSES.md will be compiled from fetched license files only (P8) —
   nothing is bundled yet, so there is nothing to honestly document today.
 - Edge gap (documented, deliberately unfixed): a machine where ffmpeg exists

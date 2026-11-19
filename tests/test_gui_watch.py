@@ -85,11 +85,16 @@ def fake_watchers(monkeypatch):
 
 
 @pytest.fixture
-def window(qapp):
+def window(qapp, tmp_path):
     from transmute.gui.app import MainWindow
+    from transmute.paths import AppPaths
     from test_gui_controller import _report
+    # isolated prefs: the panel PERSISTS watch rules, so an unpersistent
+    # controller would leak test paths into the developer's real file
+    root = AppPaths(tmp_path / "root")
+    root.ensure()
     ctrl = ConverterController(report_provider=_report,
-                               queue=_RecordingQueue())
+                               queue=_RecordingQueue(), paths=root)
     ctrl._report = _report()
     win = MainWindow(controller=ctrl)
     yield win
@@ -299,3 +304,122 @@ class TestSettledFeedIsThreadSafe:
         w = window.ctrl.queue
         assert w.added, "settled file never reached the queue"
         assert w.added[0][0] == clip  # src preserved, not renamed
+
+
+class _FakeWatcherStrict(_FakeWatcher):
+    """Also mirrors the real 'watch root is not a directory' refusal, so the
+    persistence tests see the same failure an unplugged drive causes."""
+
+    def add_folder(self, src, dst):
+        src = Path(src)
+        if not src.is_dir():
+            raise ValueError(f"watch root is not a directory: {src}")
+        super().add_folder(src, dst)
+
+
+class TestWatchFoldersSurviveRestart:
+    """A watch folder is a standing arrangement: rules persist, resume on
+    relaunch, and a missing (unplugged) folder is stated - never dropped."""
+
+    def _ctrl(self, tmp_path):
+        from transmute.paths import AppPaths
+        from test_gui_controller import _report
+        root = AppPaths(tmp_path / "root")
+        root.ensure()
+        return ConverterController(report_provider=_report,
+                                   queue=_RecordingQueue(), paths=root)
+
+    def _window(self, qapp, monkeypatch, ctrl):
+        monkeypatch.setattr("transmute.watch.FolderWatcher",
+                            _FakeWatcherStrict)
+        _FakeWatcher.instances = []
+        from transmute.gui.app import MainWindow
+        return MainWindow(controller=ctrl)
+
+    def test_add_persists_remove_unpersists(self, qapp, monkeypatch, tmp_path):
+        ctrl = self._ctrl(tmp_path)
+        win = self._window(qapp, monkeypatch, ctrl)
+        try:
+            a, b = tmp_path / "inbox", tmp_path / "out"
+            a.mkdir(); b.mkdir()
+            win._watch_add(a, b)
+            assert ctrl.prefs()["watch_folders"] == [[str(a), str(b)]]
+            win.watch_list.setCurrentRow(0)
+            win._watch_remove_selected()
+            assert ctrl.prefs()["watch_folders"] == []
+            assert win.watch_list.count() == 0
+        finally:
+            win.close()
+
+    def test_saved_rules_resume_at_startup(self, qapp, monkeypatch, tmp_path):
+        ctrl = self._ctrl(tmp_path)
+        a, b = tmp_path / "inbox", tmp_path / "out"
+        c, d = tmp_path / "cam", tmp_path / "camout"
+        for p in (a, b, c, d):
+            p.mkdir()
+        ctrl.set_pref("watch_folders", [[str(a), str(b)], [str(c), str(d)]])
+        win = self._window(qapp, monkeypatch, ctrl)
+        try:
+            watching = {tuple(map(str, f)) for w in _FakeWatcher.instances
+                        for f in w.folders}
+            assert watching == {(str(a), str(b)), (str(c), str(d))}
+            assert any(w.started for w in _FakeWatcher.instances)
+            texts = [win.watch_list.item(i).text()
+                     for i in range(win.watch_list.count())]
+            assert not any("missing" in t for t in texts)
+            assert "resumed" in win.lbl_watch.text()
+            # rules themselves unchanged: resuming must not rewrite prefs
+            assert ctrl.prefs()["watch_folders"] == [[str(a), str(b)],
+                                                     [str(c), str(d)]]
+        finally:
+            win.close()
+
+    def test_missing_folder_listed_not_dropped_then_resumable(
+            self, qapp, monkeypatch, tmp_path):
+        ctrl = self._ctrl(tmp_path)
+        gone = tmp_path / "usb"      # NOT created: the drive is out
+        out = tmp_path / "out"
+        out.mkdir()
+        ctrl.set_pref("watch_folders", [[str(gone), str(out)]])
+        win = self._window(qapp, monkeypatch, ctrl)
+        try:
+            assert win.watch_list.count() == 1
+            assert "(folder missing)" in win.watch_list.item(0).text()
+            assert "not here" in win.lbl_watch.text()
+            assert ctrl.prefs()["watch_folders"] == [[str(gone), str(out)]]
+            # drive comes back: picking the SAME folder re-arms that rule
+            gone.mkdir()
+            win._watch_add(gone, out)
+            assert "resumed" in win.lbl_watch.text()
+            assert "(folder missing)" not in win.watch_list.item(0).text()
+            assert any(tuple(map(str, f)) == (str(gone), str(out))
+                       for w in _FakeWatcher.instances for f in w.folders)
+        finally:
+            win.close()
+
+    def test_duplicate_add_says_already_watching(self, qapp, monkeypatch,
+                                                 tmp_path):
+        ctrl = self._ctrl(tmp_path)
+        a, b = tmp_path / "inbox", tmp_path / "out"
+        a.mkdir(); b.mkdir()
+        win = self._window(qapp, monkeypatch, ctrl)
+        try:
+            win._watch_add(a, b)
+            win._watch_add(a, b)
+            assert "already watching" in win.lbl_watch.text()
+            assert ctrl.prefs()["watch_folders"] == [[str(a), str(b)]]
+        finally:
+            win.close()
+
+    def test_junk_rules_skipped_not_fatal(self, qapp, monkeypatch, tmp_path):
+        ctrl = self._ctrl(tmp_path)
+        a, b = tmp_path / "inbox", tmp_path / "out"
+        a.mkdir(); b.mkdir()
+        ctrl.set_pref("watch_folders", ["nope", [str(a)], None,
+                                        [str(a), str(b)]])
+        win = self._window(qapp, monkeypatch, ctrl)
+        try:
+            assert win.watch_list.count() == 1  # only the valid pair survives
+            assert any(w.folders for w in _FakeWatcher.instances)
+        finally:
+            win.close()

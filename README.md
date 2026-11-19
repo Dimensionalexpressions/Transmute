@@ -72,7 +72,10 @@ q.run()                                       # resumable after a crash
 The governor keeps Transmute at ~80% CPU by suspending its *own* child
 process groups (SIGSTOP/SIGCONT sawtooth), throttles its own file IO, and
 runs at most a few GPU encode sessions at once. It never touches other
-programs.
+programs. In the GUI this is the **"Throttle while converting"** checkbox
+(default on, remembered per machine): unchecked, engines run flat out.
+The server always throttles unless the operator sets `TRANSMUTE_GOVERNOR=0`
+in its environment — an uploaded file should never own somebody's machine.
 
 ## Where things live
 

@@ -202,10 +202,15 @@ class ConverterController:
     def __init__(self,
                  report_provider: Callable[[], CapabilityReport] | None = None,
                  queue: Any | None = None,
-                 paths: AppPaths | None = None) -> None:
+                 paths: AppPaths | None = None,
+                 governor: Any | None = None) -> None:
         self._report_provider = report_provider
         self._paths = paths
         self._queue = queue
+        # the throttle: a ResourceGovernor when the user wants the machine
+        # left usable, None when they want full speed (GUI checkbox).
+        # None reaches JobQueue exactly like an absent throttle.
+        self._governor = governor
         self._report: CapabilityReport | None = None
         # single reusable preview dir: each first_frame() call replaces the
         # previous PNG in place - no temp dir per click
@@ -332,7 +337,8 @@ class ConverterController:
     def queue(self):
         if self._queue is None:
             from ..runner.queue import JobQueue
-            self._queue = JobQueue(paths=self._paths)
+            self._queue = JobQueue(paths=self._paths,
+                                   governor=self._governor)
         return self._queue
 
     # ------------------------------------------------------------ pickers

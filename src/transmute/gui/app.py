@@ -160,6 +160,13 @@ class MainWindow(QMainWindow):
         self._watch_events: pyqueue.SimpleQueue[str] = pyqueue.SimpleQueue()
         self._watch_more = False                 # watch jobs await a worker
         self._watch_missing: set[tuple[str, str]] = set()  # saved but not here
+        # The throttle is a per-machine judgement call, not a constant:
+        # ResourceGovernor keeps conversions from owning the machine (CPU
+        # cap, low IO priority, capped GPU sessions) but it costs speed.
+        # The checkbox below decides; this object is the thing toggled -
+        # detached from the queue when off, started and attached when on.
+        from ..governor import make_governor
+        self._governor = make_governor()
         self.run_done.connect(self._on_worker_done)
         self.reprobe_done.connect(self._on_reprobe_done)
         self.bench_note.connect(self._on_bench_note)
@@ -186,6 +193,10 @@ class MainWindow(QMainWindow):
         # watch folders are a standing arrangement, not a per-session wish:
         # saved rules re-arm their watcher now that every widget exists
         self._restore_watch_folders()
+        # bring the governor to the state the persisted checkbox asks for
+        # (off by default only if the user ever said so; new machines
+        # get the considerate behaviour, matching the README promise)
+        self._apply_throttle(self.chk_throttle.isChecked())
 
     # ------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -326,6 +337,19 @@ class MainWindow(QMainWindow):
             "run any time.")
         self.btn_bench.clicked.connect(self._start_reprobe)
         rv.addRow("", self.btn_bench)
+        self.chk_throttle = QCheckBox("Throttle while converting")
+        self.chk_throttle.setToolTip(
+            "Checked (default): conversions stay under this machine's\n"
+            "measured CPU headroom, disk work runs at low priority, and\n"
+            "GPU encodes run as capped sessions - the PC stays usable.\n"
+            "Unchecked: engines run flat out - fastest, but ffmpeg\n"
+            "takes every core it can reach.\n"
+            "Applies to new conversions immediately; remembered.")
+        self.chk_throttle.setChecked(
+            bool(self.ctrl.prefs().get("throttle",
+                                       self._governor.enabled)))
+        self.chk_throttle.toggled.connect(self._apply_throttle)
+        rv.addRow("", self.chk_throttle)
         # benchmark progress: the measurement takes minutes on slow machines
         # and the user must SEE which encoder it is busy with right now.
         self.bench_bar = QProgressBar()
@@ -1717,6 +1741,21 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_serve.setText("not serving")
 
+    def _apply_throttle(self, on: bool) -> None:
+        """Checkbox is the only switch. Off: governor detached from the
+        queue and stopped - children released, cap thread gone. On: started
+        and attached. Already-running engines keep the priority class they
+        were born with; everything launched after the click obeys it."""
+        gov = self._governor
+        if on:
+            gov.enabled = True
+            gov.start()
+        else:
+            gov.enabled = False
+            gov.stop()
+        self.ctrl.queue.governor = gov if on else None
+        self.ctrl.set_pref("throttle", bool(on))
+
     def closeEvent(self, event):  # noqa: N802
         # Signal every background measurer FIRST: the joins below are
         # bounded but can still take seconds, and an unsignalled
@@ -1726,6 +1765,10 @@ class MainWindow(QMainWindow):
         # process exits replays as interrupted on next start (journal
         # recovery), never as a silent success.
         self._bench_cancel = True
+        if self._governor is not None:
+            self._governor.stop()  # release stopped children BEFORE exit:
+            self._governor = None  # nothing may linger throttled (or killed
+                                   # by a job-object close) after we go
         est = getattr(self, "_est_stop", None)
         if est is not None:
             est.set()

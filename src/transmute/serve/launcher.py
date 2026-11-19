@@ -35,6 +35,7 @@ class ServeLauncher:
         self._srv = None
         self._thread: threading.Thread | None = None
         self._st = None
+        self._gov = None
         self.mode = "off"
         self.error = ""
         self.token: str | None = None
@@ -56,12 +57,27 @@ class ServeLauncher:
         from .app import create_app
         host = "127.0.0.1" if mode == "local" else "0.0.0.0"
         token = secrets.token_urlsafe(18) if mode == "lan" else None
-        if self._state_factory is not None:
-            st = self._state_factory(max_upload_mb=max_upload_mb,
-                                     auth_token=token)
-        else:
+        # A server is somebody else's invitation to load this machine:
+        # uploads convert under the throttle (CPU cap, low IO priority,
+        # capped GPU sessions) unless the operator opted out with
+        # TRANSMUTE_GOVERNOR=0 in the environment. start() is a no-op when
+        # the governor is disabled, so this can't spawn threads behind
+        # the operator's back.
+        from ..governor import make_governor
+        gov = make_governor()
+        gov.start()
+        if self._state_factory is None:
             from .core import ServeState
-            st = ServeState(max_upload_mb=max_upload_mb, auth_token=token)
+            factory = ServeState
+        else:
+            factory = self._state_factory
+        try:
+            st = factory(max_upload_mb=max_upload_mb, auth_token=token,
+                         governor=gov)
+        except TypeError:      # older factory: attach before the queue is
+            st = factory(max_upload_mb=max_upload_mb,
+                         auth_token=token)          # built (post_init)
+            st.governor = gov
         cfg = uvicorn.Config(create_app(st), host=host, port=port,
                              log_level="warning")
         srv = uvicorn.Server(cfg)
@@ -92,10 +108,12 @@ class ServeLauncher:
                           f"port {port} is busy or Transmute could not "
                           "bind it")
             st.stop()
-            return self.status()
+            gov.stop()     # never leave a monitor thread for a server
+            return self.status()   # that never came up
         real = port or srv.servers[0].sockets[0].getsockname()[1]
         shown = local_ip() if mode == "lan" else "127.0.0.1"
         self._srv, self._thread, self._st = srv, thread, st
+        self._gov = gov
         self.mode, self.error, self.token = mode, None, token
         self.url = f"http://{shown}:{real}/" + (f"?token={token}"
                                                 if token else "")
@@ -111,6 +129,9 @@ class ServeLauncher:
                 thread.join(timeout=8)
         if st is not None:
             st.stop()  # idempotent; stops the worker even if uvicorn lingered
+        if self._gov is not None:
+            self._gov.stop()   # releases SIGSTOPs / the job object -
+            self._gov = None   # no engine may outlive a stopped server
 
     def status(self) -> dict[str, Any]:
         return {"mode": self.mode, "running": self.running, "url": self.url,

@@ -339,6 +339,11 @@ def test_launcher_lifecycle_switch_and_stop(tmp_path):
     try:
         st = ln.start("local", port=0)
         assert st["running"] and st["mode"] == "local" and not st["token"]
+        # a server converts OTHER people's files: it must run under the
+        # throttle unless TRANSMUTE_GOVERNOR says otherwise, and the
+        # governor has to reach the queue that will actually spawn engines
+        gov_ref = ln._st.governor
+        assert gov_ref is not None and ln._st.queue.governor is gov_ref
         assert st["url"].startswith("http://127.0.0.1:")
         base = st["url"].split("?")[0]
         with urllib.request.urlopen(base + "healthz", timeout=5) as r:
@@ -360,6 +365,8 @@ def test_launcher_lifecycle_switch_and_stop(tmp_path):
         assert host  # lan url names the address a phone would use
         ln.stop()
         assert ln.status()["mode"] == "off"
+        assert gov_ref._thread is None          # no monitor thread outlives
+        assert ln._gov is None                  # a stopped server
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz",
                                    timeout=2)

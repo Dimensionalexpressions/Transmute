@@ -5,6 +5,7 @@ the suite never downloads or ships sample content.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import warnings
 from pathlib import Path
@@ -14,6 +15,26 @@ import pytest
 warnings.filterwarnings("ignore")
 
 FF = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
+
+
+@pytest.fixture(autouse=True)
+def _gpu_lane_stays_put():
+    """Restore TRANSMUTE_DISABLE_GPU after every test.
+
+    The GUI's "use graphics card" checkbox deliberately rewrites this env var
+    in-process (that IS the app's runtime toggle) — and GUI tests legitimately
+    click it. Without restoring, the first such click silently deletes the
+    GPU-off guarantee for the rest of the process: the tonemap test later in
+    the same run then auto-picked h264_nvenc and died with ffmpeg -22. Each
+    test must see the lane it was declared with, whatever earlier tests' GUIs
+    clicked."""
+    had = "TRANSMUTE_DISABLE_GPU" in os.environ
+    saved = os.environ.get("TRANSMUTE_DISABLE_GPU")
+    yield
+    if had:
+        os.environ["TRANSMUTE_DISABLE_GPU"] = saved
+    else:
+        os.environ.pop("TRANSMUTE_DISABLE_GPU", None)
 
 
 def make_text_pdf(pages: list[str]) -> bytes:

@@ -118,6 +118,51 @@ def test_tonemap_optin_produces_sdr_and_self_verifies(tmp_path, fixtures):
     assert v2.ok, v2.reason
 
 
+def test_tonemap_auto_pick_never_selects_gpu_encoder(monkeypatch):
+    """Live bug on a GPU box: with "use graphics card" on, the speed ladder
+    auto-picked h264_nvenc for a tone-map; the chain's plain sw frames made
+    ffmpeg exit -22 and NOTHING was written. Reproduced by the full suite when
+    a GUI GPU-toggle test cleared TRANSMUTE_DISABLE_GPU for later tests.
+    Rule: tone-maps only ever run on verified CPU encoders; GPU-only machines
+    get an honest failure, never a doomed -22 run."""
+    import transmute.engines.video as vid
+    from transmute.probe.capability import EncoderCapability
+
+    monkeypatch.setattr(vid, "gpu_force_disabled", lambda: False)
+    nvenc = EncoderCapability(name="h264_nvenc", codec="h264",
+                              backend="nvidia-nvenc", hw=True,
+                              verified=True, fps=900.0)
+    x264 = EncoderCapability(name="libx264", codec="h264", backend="cpu",
+                             hw=False, verified=True, fps=60.0)
+
+    class _Report:
+        def __init__(self, caps):
+            self._caps = caps
+
+        def verified_encoders(self, codec):
+            return [c for c in self._caps if c.codec == codec and c.verified]
+
+    eng = _eng()
+
+    def _fake_report(caps):
+        monkeypatch.setattr(eng.prober, "report",
+                            lambda *a, **k: _Report(caps))
+
+    # GPU healthy and fastest: ordinary picks still take it...
+    _fake_report([nvenc, x264])
+    assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=None).hw is True
+    # ...but a tone-map must stay on the CPU encoder
+    assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=None,
+                            tone_map=True).name == "libx264"
+    # even when the user asked for the GPU: tone-map outranks the wish
+    assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=True,
+                            tone_map=True).name == "libx264"
+    # GPU-only verified machine: honest None, no silent fallback to a doomed -22
+    _fake_report([nvenc])
+    assert eng.pick_encoder("h264", want_10bit=False, prefer_hw=None,
+                            tone_map=True) is None
+
+
 # ------------------------------------------------------------------- audio policy
 def test_audio_replace_mp4_from_opus_mkv(tmp_path, fixtures):
     eng = _eng()

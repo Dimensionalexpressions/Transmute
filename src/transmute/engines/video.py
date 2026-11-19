@@ -198,12 +198,23 @@ class VideoEngine:
 
     # ------------------------------------------------------------- planning
     def pick_encoder(self, codec: str, *, want_10bit: bool,
-                     prefer_hw: bool | None) -> EncoderCapability | None:
+                     prefer_hw: bool | None,
+                     tone_map: bool = False) -> EncoderCapability | None:
         report = self.prober.report()
         cands = report.verified_encoders(codec)
         if gpu_force_disabled():
             # user switched "use graphics card" off in More…: honour it at
             # selection time too, not just in the (possibly stale) report
+            cands = [c for c in cands if not c.hw]
+        if tone_map:
+            # The tone-map chain must receive plain sw frames (see
+            # _hw_decode_pre). Measured on this machine WITH the GPU on:
+            # feeding those frames to a GPU encoder fails the encode outright
+            # (nvenc: "Task finished with error code: -22"). GPU encoders are
+            # therefore never auto-selected for tone-maps - and there is NO
+            # fallback to them: a machine whose only verified encoder is GPU
+            # gets an honest "no CPU encoder for tone-map" failure, not a
+            # doomed -22 run.
             cands = [c for c in cands if not c.hw]
         if want_10bit:
             cands = [c for c in cands
@@ -357,7 +368,8 @@ class VideoEngine:
         cap: EncoderCapability | None = None
         if not same_video:
             cap = self.pick_encoder(target_codec, want_10bit=want_10,
-                                    prefer_hw=prefer_hw) if encoder is None else None
+                                    prefer_hw=prefer_hw,
+                                    tone_map=tone) if encoder is None else None
             if encoder is not None:
                 report = self.prober.report()
                 cap = next((c for c in report.encoders
@@ -365,10 +377,19 @@ class VideoEngine:
                 if cap is None:
                     return EngineResult("failed", reason=f"encoder {encoder} not verified on this machine")
             if cap is None:
-                why = ("HDR/10-bit source and no verified 10-bit encoder available "
-                       "(refusing silent HDR->SDR; tone-map is opt-in: enable it or "
-                       "pick mkv/hdr target)"
-                       if want_10 else f"no verified encoder for {target_codec} on this machine")
+                if want_10:
+                    why = ("HDR/10-bit source and no verified 10-bit encoder available "
+                           "(refusing silent HDR->SDR; tone-map is opt-in: enable it or "
+                           "pick mkv/hdr target)")
+                elif tone and any(c.hw for c in
+                                  self.prober.report().verified_encoders(target_codec)):
+                    why = (f"tone-map needs a CPU encoder for {target_codec}: this "
+                           "machine's only verified encoder(s) for it run on the GPU, "
+                           "and the tone-map chain's CPU frames are rejected there "
+                           "(measured). A CPU encoder (e.g. x264) or turning tone-map "
+                           "off will work")
+                else:
+                    why = f"no verified encoder for {target_codec} on this machine"
                 return EngineResult("failed", reason=why)
 
         # Upload encoders (VAAPI/QSV): name a node that runs it NOW, or fail

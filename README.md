@@ -10,6 +10,15 @@ Ghostscript, qpdf, LibreOffice, pandoc and poppler tools **already installed
 on your machine**, as external processes, and it *measures* what your machine
 can actually do before it ever offers you an option.
 
+## Status: Alpha
+
+Transmute is at **Alpha** stage. It is genuinely usable and its test suite
+runs on Linux and Windows, but expect rough edges: command-line and file
+formats coverage keep growing, GUI labels and flows will change, and
+release notes may carry breaking changes between versions without warning.
+Releases are tagged and labelled accordingly. Use under the license terms —
+it ships as-is, with no warranty, exactly as stated in `LICENSE`.
+
 ## Downloads
 
 Source-only for now — Transmute needs the engines installed on your machine

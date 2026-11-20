@@ -8,7 +8,7 @@ license = { text = "FUAL-1.0" }
 authors = [{ name = "Coty Julien", email = "kieros@cekfam.com" }]
 keywords = ["converter", "ffmpeg", "av1", "webp", "opus", "pdf", "media"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "License :: Other/Proprietary License",
     "Operating System :: POSIX :: Linux",

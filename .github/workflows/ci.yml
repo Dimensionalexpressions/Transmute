@@ -182,7 +182,7 @@ jobs:
           echo "::notice::w1 toolver=$(python --version 2>&1) guardbytes=$((Get-Item tools/ci_result_guard.py).Length)"
           python win_pytest_wrapper.py
           python -c "import pathlib; print('::notice::w2x crumb=' + (pathlib.Path('breadcrumb.txt').read_text() if pathlib.Path('breadcrumb.txt').exists() else 'NONE'))"
-          python -c "import pathlib; d=pathlib.Path('pytest_out.txt').read_bytes()[-1300:] if pathlib.Path('pytest_out.txt').exists() else b'<no output file>'; print('::error::pytest tail: ' + repr(d.decode('utf8','replace'))[:1200])"
+          python -c "import pathlib; d=pathlib.Path('pytest_out.txt').read_bytes() if pathlib.Path('pytest_out.txt').exists() else b''; k=d.find(b'Windows fatal exception'); k=k if k>=0 else d.find(b'Current thread'); k=k if k>=0 else max(0,len(d)-1300); print('::error::pytest tail: ' + repr(d[k:][:3000])[:3200])"
           python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt -ErrorAction SilentlyContinue)
           echo "::notice::w3 guard-exit=$LASTEXITCODE"
 

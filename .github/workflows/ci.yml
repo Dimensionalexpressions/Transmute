@@ -140,23 +140,32 @@ jobs:
         shell: pwsh
         run: |
           echo "::notice::win-suite reached"
-          # Run 44799688464 evidence: disk fine (147GB), ws-a fired, then
-          # the if/else line printed NOTHING and the rc file never existed.
-          # Binary search: unconditional one-line breadcrumbs per primitive.
-          # file-bytes also catches here-string swallow (expect ~370).
+          # Evidence chain: ws-a fired, if/else line vanished, w2 vanished,
+          # w3 fired: pytest's unterminated stdout byte-line SWALLOWED the
+          # next annotation (runner watches stdout line-starts). And the
+          # wrapper python died WITHOUT writing pytest_rc.txt even though
+          # pwsh continued - so the wrapper died during subprocess.run.
+          # Countermeasures: (1) pytest touches NO runner pipe at all - all
+          # output to file, tail re-emitted by us; (2) wrap_alive.txt written
+          # BEFORE pytest starts: alive+no-rc proves mid-run wrapper death.
           @'
           import subprocess, sys
-          try:
-              rc = subprocess.run([sys.executable, "-u", "-m", "pytest",
-                                   "-q", "-m", "not slow",
-                                   "--junitxml=results.xml"], timeout=1500).returncode
-          except subprocess.TimeoutExpired:
-              rc = 124
+          open("wrap_alive.txt", "w").write("1")
+          with open("pytest_out.txt", "wb") as out:
+              try:
+                  rc = subprocess.run([sys.executable, "-u", "-m", "pytest",
+                                       "-q", "-m", "not slow",
+                                       "--junitxml=results.xml"],
+                                      stdout=out, stderr=subprocess.STDOUT,
+                                      timeout=1500).returncode
+              except subprocess.TimeoutExpired:
+                  rc = 124
           open("pytest_rc.txt", "w").write(str(rc & 0xFFFFFFFF))
           '@ | Set-Content -Encoding utf8 win_pytest_wrapper.py
           echo "::notice::w1 file-bytes=$((Get-Item win_pytest_wrapper.py -ErrorAction SilentlyContinue).Length)"
           python win_pytest_wrapper.py
-          echo "::notice::w2 pyexit=$LASTEXITCODE rcfile=$(Test-Path pytest_rc.txt)"
+          echo "::notice::w2 pyexit=$LASTEXITCODE alive=$(Test-Path wrap_alive.txt) rcfile=$(Test-Path pytest_rc.txt)"
+          python -c "import pathlib; d=pathlib.Path('pytest_out.txt').read_bytes()[-1300:] if pathlib.Path('pytest_out.txt').exists() else b'<no output file>'; print('::error::pytest tail: ' + repr(d.decode('utf8','replace'))[:1200])"
           python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt -ErrorAction SilentlyContinue)
           echo "::notice::w3 guard-exit=$LASTEXITCODE"
 
@@ -167,17 +176,21 @@ jobs:
           echo "::notice::win-governor reached"
           @'
           import subprocess, sys
-          try:
-              rc = subprocess.run([sys.executable, "-u", "-m", "pytest", "-q",
-                                   "tests/test_governor_windows.py",
-                                   "--junitxml=wjo.xml"], timeout=600).returncode
-          except subprocess.TimeoutExpired:
-              rc = 124
+          open("governor_alive.txt", "w").write("1")
+          with open("wjo_out.txt", "wb") as out:
+              try:
+                  rc = subprocess.run([sys.executable, "-u", "-m", "pytest", "-q",
+                                       "tests/test_governor_windows.py",
+                                       "--junitxml=wjo.xml"],
+                                      stdout=out, stderr=subprocess.STDOUT,
+                                      timeout=600).returncode
+              except subprocess.TimeoutExpired:
+                  rc = 124
           open("wjo_rc.txt", "w").write(str(rc & 0xFFFFFFFF))
           '@ | Set-Content -Encoding utf8 win_governor_wrapper.py
           echo "::notice::g1 file-bytes=$((Get-Item win_governor_wrapper.py -ErrorAction SilentlyContinue).Length)"
           python win_governor_wrapper.py
-          echo "::notice::g2 pyexit=$LASTEXITCODE rcfile=$(Test-Path wjo_rc.txt)"
+          echo "::notice::g2 pyexit=$LASTEXITCODE alive=$(Test-Path governor_alive.txt) rcfile=$(Test-Path wjo_rc.txt)"
           # --no-skips: on a real runner (unlike a nested-Job container) attach
           # succeeds, so every governor test must actually run here.
           python tools/ci_result_guard.py wjo.xml (Get-Content wjo_rc.txt -ErrorAction SilentlyContinue) --no-skips

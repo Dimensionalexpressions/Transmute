@@ -55,6 +55,13 @@ def test_hw_rows_skipped_without_gpu(fast_report, monkeypatch):
     # Force a GPU-less machine deterministically: dev boxes DO have render
     # nodes, and the stubbed trial would verify every hw encoder there -
     # the skip-on-absent-nodes rule must be proven regardless of host.
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("the device-node gate is a Linux mechanism: Windows "
+                    "MF/AMF/NVENC upload system frames with no /dev nodes, "
+                    "so h264_mf VERIFYING on a GPU-less Windows runner is "
+                    "honest behaviour, not a leak (CI run 44826691434 proved "
+                    "the trial really encodes there via the software MFT).")
     monkeypatch.setattr(cap_mod, "_has_dri_render_node", lambda: False)
     monkeypatch.setattr(cap_mod, "_has_nvidia_nodes", lambda: False)
     prober, _ = fast_report

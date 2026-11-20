@@ -231,6 +231,18 @@ class FolderWatcher:
                     pend.stable_since = now
                 elif now - pend.stable_since >= self.quiet_s:
                     del self._pending[path]
+                    # Ignore rules re-checked AT DISPATCH, not just at event
+                    # time: a .skip guard file or a hidden-dir rename can land
+                    # AFTER the first event was filtered (kernel event vs the
+                    # next line of the writer's code is an unordered race).
+                    # Distro CI proved it: hold.jpg dispatched on loaded
+                    # runners, runs 44821148908 + 44826691434.
+                    try:
+                        rel = path.relative_to(pend.folder.src)
+                    except ValueError:
+                        rel = Path(path.name)
+                    if is_ignored(rel, real_path=path):
+                        continue
                     if self._dispatched.get(path) != snap:
                         self._dispatched[path] = snap
                         ready.append((pend.folder, path, snap))

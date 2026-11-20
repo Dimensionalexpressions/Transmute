@@ -49,6 +49,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qpdf pandoc poppler-utils ghostscript \
             texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
+            lmodern \
             libreoffice-writer \
             libegl1 libgl1 libdbus-1-3 libxkbcommon0 libfontconfig1
 
@@ -82,7 +83,7 @@ jobs:
           command -v pdflatex
 
       - name: Install the app (Python deps only; engines stay external)
-        run: pip install -e ".[dev,gui]"
+        run: pip install -e ".[dev,gui,serve]"
 
       - name: Test suite (all tiers except slow)
         run: |
@@ -118,7 +119,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install the app (Python deps only; engines stay external)
-        run: pip install -e ".[dev,gui]"
+        run: pip install -e ".[dev,gui,serve]"
 
       - name: Show what the runtime probe really finds (no assumptions)
         run: |

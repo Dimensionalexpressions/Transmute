@@ -10,6 +10,18 @@ Ghostscript, qpdf, LibreOffice, pandoc and poppler tools **already installed
 on your machine**, as external processes, and it *measures* what your machine
 can actually do before it ever offers you an option.
 
+## Downloads
+
+Source-only for now — Transmute needs the engines installed on your machine
+anyway (FFmpeg, Ghostscript, qpdf, LibreOffice, pandoc, poppler), so a zip
+buys you little. Pick one:
+
+| How | Get it |
+|---|---|
+| Source archive | [Releases](https://github.com/Dimensionalexpressions/transmute/releases) → latest, then the Quickstart below |
+| Nix flake | `nix run github:Dimensionalexpressions/transmute` — engines are baked into PATH by the flake |
+| Git checkout | the Quickstart below |
+
 ## Publisher
 
 **Dimensional Expressions Software**  

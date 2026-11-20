@@ -122,6 +122,8 @@ jobs:
         run: pip install -e ".[dev,gui,serve]"
 
       - name: Show what the runtime probe really finds (no assumptions)
+        # Diagnostic only: whatever this prints, the suite must still run.
+        continue-on-error: true
         shell: pwsh
         run: |
           # pwsh here-string -> file -> python. No nested quoting under any
@@ -137,6 +139,7 @@ jobs:
       - name: Test suite (all tiers except slow)
         shell: pwsh
         run: |
+          echo "::notice::win-suite reached"
           python -m pytest -q -m "not slow" --junitxml=results.xml
           python tools/ci_result_guard.py results.xml $LASTEXITCODE
 
@@ -144,6 +147,7 @@ jobs:
         shell: pwsh
         timeout-minutes: 12
         run: |
+          echo "::notice::win-governor reached"
           python -m pytest -q tests/test_governor_windows.py --junitxml=wjo.xml
           # --no-skips: on a real runner (unlike a nested-Job container) attach
           # succeeds, so every governor test must actually run here.

@@ -27,20 +27,35 @@ def main(argv):
     xml_path, rc_s = args[0], args[1]
     rc = int(rc_s)
 
-    root = ET.parse(xml_path).getroot()
+    try:
+        root = ET.parse(xml_path).getroot()
+    except (OSError, ET.ParseError) as e:
+        # The runner log is token-only; annotations are public. Say WHY loudly.
+        print(f"::error::junit xml unusable ({e!r}); pytest rc={rc} - if the "
+              "file is missing pytest died mid-session, before writing it")
+        return 1
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     tests = failures = errors = skipped = 0
+    failed_names = []
     for s in suites:
         tests += int(s.get("tests", 0))
         failures += int(s.get("failures", 0))
         errors += int(s.get("errors", 0))
         skipped += int(s.get("skipped", 0))
+        for tc in s.iter("testcase"):
+            if tc.find("failure") is not None or tc.find("error") is not None:
+                failed_names.append(f"{tc.get('classname')}::{tc.get('name')}")
 
     print(f"guard: xml says tests={tests} failures={failures} "
           f"errors={errors} skipped={skipped}; rc={rc}")
 
     if failures or errors:
         print(f"::error::pytest produced {failures} failures / {errors} errors")
+        # Public channel: runner logs need a token, annotations do not.
+        for name in failed_names[:12]:
+            print(f"::error::FAILED {name}")
+        if len(failed_names) > 12:
+            print(f"::error::... and {len(failed_names) - 12} more, see junit xml")
         return 1
     if tests == 0:
         print("::error::junit xml has zero tests - suite never ran")

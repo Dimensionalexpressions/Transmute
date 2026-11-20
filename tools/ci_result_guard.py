@@ -19,6 +19,16 @@ import sys
 import xml.etree.ElementTree as ET
 
 CRASH_RCS = {139, 3221225477, 3221226505}  # SIGSEGV, AV, fastfail
+# CRT abort() exits 3. Same Qt-teardown crash can surface that way, but so
+# can pytest's INTERNALERROR - rc alone cannot tell them apart. Measured run
+# 44831652628: green junit xml + rc=3 + faulthandler dump ("Current thread",
+# "Extension modules:") in the captured log AFTER the summary: a post-green
+# teardown crash. So rc 3 is tolerated ONLY with that crash signature in the
+# log file (optional third argument) - and a log containing INTERNALERROR
+# always fails, whatever the rc, because that is pytest dying, not Qt.
+ABORT_RC = 3
+CRASH_MARKERS = (b"Current thread", b"Windows fatal exception",
+                 b"Extension modules:")
 
 
 def main(argv):
@@ -26,10 +36,17 @@ def main(argv):
     flags = {a for a in argv[1:] if a.startswith("--")}
     if len(args) < 2 or not args[1].strip():
         # A silent traceback is the blind spot that hid every Windows failure.
-        print(f"::error::guard needs <xml> <rc>; got {argv[1:]!r}")
+        print(f"::error::guard needs <xml> <rc> [log]; got {argv[1:]!r}")
         return 1
     xml_path, rc_s = args[0], args[1]
     rc = int(rc_s)
+    log_data = b""
+    if len(args) > 2:
+        try:
+            with open(args[2], "rb") as fh:
+                log_data = fh.read()
+        except OSError:
+            pass  # no log: rc=3 stays suspect, everything else unchanged
 
     try:
         root = ET.parse(xml_path).getroot()
@@ -85,11 +102,21 @@ def main(argv):
     if "--no-skips" in flags and skipped:
         print(f"::error::{skipped} test(s) skipped - coverage gate requires them to RUN")
         return 1
+    if log_data and b"INTERNALERROR" in log_data:
+        print("::error::captured log contains INTERNALERROR - pytest itself "
+              "died; junit xml cannot be trusted, failing regardless of rc")
+        return 1
     if rc == 0:
         return 0
     if rc in CRASH_RCS:
         print(f"note: pytest died with {rc} AFTER writing a green junit xml - "
               "known Qt-offscreen interpreter-teardown crash; XML verdict stands")
+        return 0
+    if rc == ABORT_RC and any(m in log_data for m in CRASH_MARKERS):
+        print("note: pytest aborted (rc=3) AFTER writing a green junit xml; "
+              "captured log carries a faulthandler crash dump (Current thread/"
+              "Extension modules) - known Qt-offscreen teardown abort; XML "
+              "verdict stands")
         return 0
     print(f"::error::pytest exited {rc} with a green xml - suspicious, failing")
     return rc

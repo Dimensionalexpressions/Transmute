@@ -140,15 +140,21 @@ jobs:
         shell: pwsh
         run: |
           echo "::notice::win-suite reached"
-          python -m pytest -q -m "not slow" --junitxml=results.xml
-          python tools/ci_result_guard.py results.xml $LASTEXITCODE
+          # subprocess isolation: pytest.exe may fast-fail (0xC0000409 -
+          # PySide6 offscreen teardown; the Linux twin of the measured 139).
+          # If it does, pwsh aborts this step AT pytest and the guard never
+          # runs - which is exactly the silent exit-1 we kept seeing. The
+          # wrapper survives the corpse, normalises the signed NTSTATUS to
+          # unsigned (the guard's CRASH_RCS domain), writes it to a file.
+          python -c "import subprocess,sys; rc=subprocess.run([sys.executable,'-u','-m','pytest','-q','-m','not slow','--junitxml=results.xml']).returncode; open('pytest_rc.txt','w').write(str(rc & 0xFFFFFFFF))"
+          python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt)
 
       - name: Governor load test - real Job Object cap must RUN and hold
         shell: pwsh
         timeout-minutes: 12
         run: |
           echo "::notice::win-governor reached"
-          python -m pytest -q tests/test_governor_windows.py --junitxml=wjo.xml
+          python -c "import subprocess,sys; rc=subprocess.run([sys.executable,'-u','-m','pytest','-q','tests/test_governor_windows.py','--junitxml=wjo.xml']).returncode; open('wjo_rc.txt','w').write(str(rc & 0xFFFFFFFF))"
           # --no-skips: on a real runner (unlike a nested-Job container) attach
           # succeeds, so every governor test must actually run here.
-          python tools/ci_result_guard.py wjo.xml $LASTEXITCODE --no-skips
+          python tools/ci_result_guard.py wjo.xml (Get-Content wjo_rc.txt) --no-skips

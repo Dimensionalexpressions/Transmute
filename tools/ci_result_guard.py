@@ -24,6 +24,10 @@ CRASH_RCS = {139, 3221225477, 3221226505}  # SIGSEGV, AV, fastfail
 def main(argv):
     args = [a for a in argv[1:] if not a.startswith("--")]
     flags = {a for a in argv[1:] if a.startswith("--")}
+    if len(args) < 2 or not args[1].strip():
+        # A silent traceback is the blind spot that hid every Windows failure.
+        print(f"::error::guard needs <xml> <rc>; got {argv[1:]!r}")
+        return 1
     xml_path, rc_s = args[0], args[1]
     rc = int(rc_s)
 

@@ -142,12 +142,15 @@ jobs:
           echo "::notice::win-suite reached"
           # subprocess isolation: pytest.exe may fast-fail (0xC0000409 -
           # PySide6 offscreen teardown; the Linux twin of the measured 139).
-          # If it does, pwsh aborts this step AT pytest and the guard never
-          # runs - which is exactly the silent exit-1 we kept seeing. The
-          # wrapper survives the corpse, normalises the signed NTSTATUS to
-          # unsigned (the guard's CRASH_RCS domain), writes it to a file.
+          # Wrapper survives, normalises signed NTSTATUS to unsigned (guard
+          # CRASH_RCS domain), writes it to a file.
+          # ws-a/b/c breadcrumbs: the last notice printed IS the line that
+          # died (a prior failure was a silent exit 1 somewhere in here).
+          echo "::notice::ws-a wrapper starting"
           python -c "import subprocess,sys; rc=subprocess.run([sys.executable,'-u','-m','pytest','-q','-m','not slow','--junitxml=results.xml']).returncode; open('pytest_rc.txt','w').write(str(rc & 0xFFFFFFFF))"
-          python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt)
+          if (-not (Test-Path pytest_rc.txt)) { echo "::error::ws-b rc file MISSING - wrapper python never completed" } else { echo "::notice::ws-b rc=$(Get-Content pytest_rc.txt)" }
+          python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt -ErrorAction SilentlyContinue)
+          echo "::notice::ws-c guard exit=$LASTEXITCODE"
 
       - name: Governor load test - real Job Object cap must RUN and hold
         shell: pwsh

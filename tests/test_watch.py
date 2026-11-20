@@ -382,14 +382,32 @@ def test_cli_sigterm_stops_cleanly(tmp_path):
     dst.mkdir()
     env = dict(os.environ, TRANSMUTE_ROOT=str(tmp_path / "root"),
                PYTHONUNBUFFERED="1")  # stdout is a pipe: keep the banner live
+    flags = 0
+    if sys.platform == "win32":
+        # Windows has no SIGTERM; terminate() is TerminateProcess (hard kill).
+        # The graceful stop path is driven by Ctrl+C -> SIGINT, and we must not
+        # broadcast it to our own process group, so the child gets its own.
+        import subprocess as sp
+        flags = sp.CREATE_NEW_PROCESS_GROUP
     p = subprocess.Popen(
         [sys.executable, "-m", "transmute.watch", str(src), str(dst)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+        creationflags=flags)
     try:
         line = p.stdout.readline()  # blocks until startup prints
         assert "watching" in line
-        p.terminate()  # SIGTERM
-        assert p.wait(timeout=30) == 0
+        if sys.platform == "win32":
+            import signal
+            p.send_signal(signal.CTRL_C_EVENT)
+            try:
+                rc = p.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pytest.skip("CTRL_C_EVENT never arrived (no console in this "
+                            "environment) - graceful stop not testable here")
+            assert rc == 0
+        else:
+            p.terminate()  # SIGTERM
+            assert p.wait(timeout=30) == 0
     finally:
         if p.poll() is None:
             p.kill()

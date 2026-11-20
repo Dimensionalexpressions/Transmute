@@ -436,6 +436,8 @@ class TestP3VideoControls:
 
     def test_run_remux_sends_only_the_remux_option(self, window, fixtures,
                                                    monkeypatch):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         monkeypatch.setattr(window.ctrl, "remux_block_reason",
                             lambda src, ext: "")
         window.cat_box.setCurrentText("video")
@@ -453,6 +455,8 @@ class TestP3VideoControls:
 
     def test_remux_blocked_reason_shown_from_machine(self, window, fixtures,
                                                      monkeypatch):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         monkeypatch.setattr(
             window.ctrl, "remux_block_reason",
             lambda src, ext: "'vp9' cannot be copied into '.mp4' losslessly")
@@ -475,6 +479,8 @@ class TestP3VideoControls:
     def test_hdr_notice_advertises_tonemap_only_when_real(self, window,
                                                           monkeypatch,
                                                           fixtures):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         monkeypatch.setattr(window.ctrl, "hdr_source", lambda p: True)
         window.cat_box.setCurrentText("video")
         monkeypatch.setattr(type(window.ctrl), "tonemap_available",
@@ -487,6 +493,8 @@ class TestP3VideoControls:
         assert "Tone-map HDR to SDR" in window.lbl_hdr.text()
 
     def test_size_target_radio_and_enqueue(self, window, fixtures):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         window.cat_box.setCurrentText("video")
         window.rad_size.setChecked(True)
         assert window.size_box.isEnabled() and not window.crf_box.isEnabled()
@@ -498,6 +506,8 @@ class TestP3VideoControls:
         assert opts.get("size_mb") == 350.0 and "crf" not in opts
 
     def test_crf_path_wins_when_radio_back(self, window, fixtures):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         window.cat_box.setCurrentText("video")
         window.rad_size.setChecked(True)
         window.rad_crf.setChecked(True)
@@ -512,6 +522,8 @@ class TestP3VideoControls:
             and "size_mb" not in opts
 
     def test_files_of_other_category_are_not_enqueued(self, window, fixtures):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         window.cat_box.setCurrentText("image")
         window.dst_edit.setText("/tmp/cat-out")
         window._add_one(fixtures["mp4"])        # video file, image category
@@ -521,6 +533,8 @@ class TestP3VideoControls:
     def test_preview_button_shows_picture_or_honest_note(self, window,
                                                          fixtures,
                                                          monkeypatch, tmp_path):
+        if "mp4" not in fixtures:
+            pytest.skip("mp4 fixture needs ffmpeg")
         import base64
         png = tmp_path / "f.png"
         png.write_bytes(base64.b64decode(

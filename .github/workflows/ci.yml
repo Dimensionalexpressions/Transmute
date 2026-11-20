@@ -106,7 +106,7 @@ jobs:
   windows:
     name: Windows (Job Object governor)
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONUTF8: "1"
@@ -118,11 +118,26 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Provide ffmpeg (external engine; absent from current runner images)
+        # conftest builds mp4/mp3/hdr fixtures with it; the tests skip honestly
+        # without it, but CI must cover the product WITH the engine. Gyan build
+        # via winget; its bin dir is exported through GITHUB_PATH for later steps.
+        shell: pwsh
+        run: |
+          winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements --disable-interactivity
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { $exe = Get-Command ffmpeg -ErrorAction SilentlyContinue }
+          if ($exe) {
+            $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            & $exe.FullName -version | Select-Object -First 1 | ForEach-Object { "::notice::ffmpeg ready: $($_)" }
+          } else { "::error::ffmpeg install FAILED - mp4-dependent tests will skip, not fail" }
+
       - name: Install the app (Python deps only; engines stay external)
         run: pip install -e ".[dev,gui,serve]"
 
       - name: Show what the runtime probe really finds (no assumptions)
         # Diagnostic only: whatever this prints, the suite must still run.
+        # Each row is ALSO an annotation - the log is not readable via API.
         continue-on-error: true
         shell: pwsh
         run: |
@@ -134,7 +149,8 @@ jobs:
           for r in EngineManager().status_table():
               print(r["name"], r["status"], r["path"], r["version"], sep=" | ")
           '@ | Set-Content -Encoding utf8 probe_show.py
-          python probe_show.py
+          python probe_show.py | Tee-Object -FilePath probe_rows.txt
+          Get-Content probe_rows.txt | ForEach-Object { "::notice::probe $_" }
 
       - name: Test suite (all tiers except slow)
         shell: pwsh

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -249,8 +250,12 @@ class FolderWatcher:
 
 
 def _inside(path: Path, root: Path) -> bool:
-    rp, rr = str(path.resolve()), str(root)
-    return rp == rr or rp.startswith(rr.rstrip("/") + "/")
+    # Path components, not str+"/": Windows resolved paths are separated by
+    # '\' so a "/" prefix test NEVER matched and the watcher silently dropped
+    # every kernel event on Windows (P6 CI, run 44820690652: 13 test_watch
+    # timeouts). is_relative_to compares components on every platform.
+    rp = path.resolve()
+    return rp == root or rp.is_relative_to(root)
 
 
 def _is_plain_file(st: os.stat_result) -> bool:
@@ -317,7 +322,12 @@ def main(argv: list[str] | None = None) -> int:
     # startup window, otherwise the default kill disposition answers first.
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    if hasattr(signal, "SIGTERM"):  # POSIX; Windows has no SIGTERM -
+        signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    if sys.platform == "win32" and hasattr(signal, "CTRL_EVENT_GROUP_EXIT"):
+        # Ctrl+C/close already arrive as SIGINT above; group-policy exit is
+        # the closest Windows analogue of a term signal.
+        signal.signal(signal.CTRL_EVENT_GROUP_EXIT, lambda *_: stop.set())
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")

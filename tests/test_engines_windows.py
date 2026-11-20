@@ -81,6 +81,7 @@ def test_windows_names_prefer_native_binaries(win_mode):
 
 def test_linux_conventional_dirs_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(E, "_IS_WINDOWS", False)
-    dirs = [str(p) for p in E._conventional_dirs()]
+    # as_posix, not str(): WindowsPath("/usr/bin") renders "\usr\bin"
+    dirs = [p.as_posix() for p in E._conventional_dirs()]
     assert "/usr/bin" in dirs
     assert not any("Program Files" in d or "\\PF" in d for d in dirs)

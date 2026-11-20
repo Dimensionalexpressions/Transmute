@@ -5,6 +5,7 @@ probe results (F10), and enqueued options must match engine signatures."""
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -176,8 +177,9 @@ class TestEnqueue:
     def test_enqueue_passes_everything_down(self, ctrl):
         info = ctrl.enqueue("/x/a.jpg", "/out", "image", "webp", quality=63)
         src, dst, cat, opts = ctrl._queue.added[0]
-        assert (str(src), str(dst), cat, opts) == \
-            ("/x/a.jpg", "/out/a.webp", "image", {"quality": 63})
+        # Path equality, not str(): str() renders backslashes on Windows
+        assert (src, dst, cat, opts) == (
+            Path("/x/a.jpg"), Path("/out/a.webp"), "image", {"quality": 63})
         assert info.state == "queued"
 
     def test_pdf_export_options(self, ctrl):
@@ -199,17 +201,18 @@ class TestEnqueue:
         ctrl.enqueue("/x/a.pdf", "/out", "pdf", "txt (text)")
         assert len(ctrl._queue.added) == 1
         _, dst, cat, opts = ctrl._queue.added[0]
-        assert (str(dst), cat, opts) == ("/out/a.txt", "pdf", {"target": "txt"})
+        assert (dst, cat, opts) == (
+            Path("/out/a.txt"), "pdf", {"target": "txt"})
 
     def test_pdf_per_page_fanout_reads_real_page_count(self, ctrl, text_pdf):
         info = ctrl.enqueue(text_pdf, "/out", "pdf", "png (per page)")
         added = ctrl._queue.added
         assert len(added) == 2                      # page count FROM the file
-        assert [str(d) for _, d, _, _ in added] == ["/out/letter-01.png",
-                                                    "/out/letter-02.png"]
+        assert [d for _, d, _, _ in added] == [Path("/out/letter-01.png"),
+                                               Path("/out/letter-02.png")]
         assert [o["page"] for *_, o in added] == [1, 2]
         assert all(o["target"] == "png" for *_, o in added)
-        assert info.dst == "/out/letter-01.png"     # first job reported back
+        assert Path(info.dst) == Path("/out/letter-01.png")  # first job reported back
 
     def test_pdf_fanout_unreadable_raises_machine_reason(self, ctrl, tmp_path):
         broken = tmp_path / "broken.pdf"

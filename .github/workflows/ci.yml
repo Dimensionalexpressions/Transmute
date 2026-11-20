@@ -140,6 +140,8 @@ jobs:
         shell: pwsh
         run: |
           echo "::notice::win-suite reached"
+          python -c "import shutil; t,u,f=shutil.disk_usage('.'); print('DISK free GB=%.1f' % (f/2**30)); open('disk_free_gb.txt','w').write('%.1f' % (f/2**30))"
+          echo "::notice::ws-0 disk-free=$(Get-Content disk_free_gb.txt)"
           # subprocess isolation: pytest.exe may fast-fail (0xC0000409 -
           # PySide6 offscreen teardown; the Linux twin of the measured 139).
           # Wrapper survives, normalises signed NTSTATUS to unsigned (guard
@@ -147,7 +149,17 @@ jobs:
           # ws-a/b/c breadcrumbs: the last notice printed IS the line that
           # died (a prior failure was a silent exit 1 somewhere in here).
           echo "::notice::ws-a wrapper starting"
-          python -c "import subprocess,sys; rc=subprocess.run([sys.executable,'-u','-m','pytest','-q','-m','not slow','--junitxml=results.xml']).returncode; open('pytest_rc.txt','w').write(str(rc & 0xFFFFFFFF))"
+          # Here-string -> file -> python (probe step pattern). python -c
+          # with nested quotes can be mangled by pwsh native arg-passing
+          # (7.3+ changes); a file cannot be mangled at all.
+          @'
+          import subprocess, sys
+          rc = subprocess.run([sys.executable, "-u", "-m", "pytest",
+                               "-q", "-m", "not slow",
+                               "--junitxml=results.xml"]).returncode
+          open("pytest_rc.txt", "w").write(str(rc & 0xFFFFFFFF))
+          '@ | Set-Content -Encoding utf8 win_pytest_wrapper.py
+          python win_pytest_wrapper.py
           if (-not (Test-Path pytest_rc.txt)) { echo "::error::ws-b rc file MISSING - wrapper python never completed" } else { echo "::notice::ws-b rc=$(Get-Content pytest_rc.txt)" }
           python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt -ErrorAction SilentlyContinue)
           echo "::notice::ws-c guard exit=$LASTEXITCODE"
@@ -157,7 +169,15 @@ jobs:
         timeout-minutes: 12
         run: |
           echo "::notice::win-governor reached"
-          python -c "import subprocess,sys; rc=subprocess.run([sys.executable,'-u','-m','pytest','-q','tests/test_governor_windows.py','--junitxml=wjo.xml']).returncode; open('wjo_rc.txt','w').write(str(rc & 0xFFFFFFFF))"
+          @'
+          import subprocess, sys
+          rc = subprocess.run([sys.executable, "-u", "-m", "pytest", "-q",
+                               "tests/test_governor_windows.py",
+                               "--junitxml=wjo.xml"]).returncode
+          open("wjo_rc.txt", "w").write(str(rc & 0xFFFFFFFF))
+          '@ | Set-Content -Encoding utf8 win_governor_wrapper.py
+          python win_governor_wrapper.py
           # --no-skips: on a real runner (unlike a nested-Job container) attach
           # succeeds, so every governor test must actually run here.
-          python tools/ci_result_guard.py wjo.xml (Get-Content wjo_rc.txt) --no-skips
+          python tools/ci_result_guard.py wjo.xml (Get-Content wjo_rc.txt -ErrorAction SilentlyContinue) --no-skips
+          echo "::notice::wg-c guard exit=$LASTEXITCODE"

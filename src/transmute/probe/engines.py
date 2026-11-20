@@ -198,8 +198,12 @@ def _run_version(path: Path, args: tuple[str, ...], timeout_s: float) -> str:
                           # _terminate_tree can kill the whole tree
                           start_new_session=True)
     if _IS_WINDOWS:
-        # no console window flashing behind the GUI while probing engines
-        popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        # no console window flashing behind the GUI while probing engines;
+        # NEW_PROCESS_GROUP: Windows ignores start_new_session, and without
+        # an own group a timeout kill's CTRL_BREAK hits our whole console
+        # instead of the probed tree (see engines/base.run_command).
+        popen_kw["creationflags"] = (subprocess.CREATE_NO_WINDOW
+                                     | subprocess.CREATE_NEW_PROCESS_GROUP)
     proc = subprocess.Popen(argv, **popen_kw)
     try:
         out, err = communicate_bounded(proc, timeout_s)

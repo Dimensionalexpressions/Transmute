@@ -129,6 +129,15 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
             text=True, encoding="utf-8", errors="replace",
             cwd=str(cwd) if cwd else None, env=dict(env) if env else None,
             start_new_session=True,
+            # Windows: start_new_session is a NO-OP there - without an own
+            # process group the child sits in OUR console group and
+            # _terminate_tree's CTRL_BREAK lands on the whole console
+            # (live-fire: GitHub Actions runs 44810470963/44812379371/
+            # 44814376186 - pytest and its spawner were terminated mid-run,
+            # no faulthandler output, only pwsh survived). NEW_PROCESS_GROUP
+            # makes CTRL_BREAK address the child's tree alone.
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                           if sys.platform == "win32" else 0),
             preexec_fn=_nice_preexec if (not sys.platform == "win32") else None,
         )
     except OSError as exc:

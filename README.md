@@ -2,13 +2,21 @@
 
 Open-source, **runs-on-your-machine** converter for pictures, audio, video,
 PDFs and documents. Same feature class as the classic Windows converter
-suites — but open (Apache-2.0), Linux-first, and with **zero bundled codecs
-and zero copied assets**.
+suites — but source-available under the **Free Use Attribution License (FUAL-1.0)**, Linux-first
+(Windows actively validated), with **zero bundled codecs and zero copied assets**.
 
 Transmute does not ship or copy any encoder. It drives the FFmpeg,
 Ghostscript, qpdf, LibreOffice, pandoc and poppler tools **already installed
 on your machine**, as external processes, and it *measures* what your machine
 can actually do before it ever offers you an option.
+
+## Publisher
+
+**Dimensional Expressions Software**  
+Published by **Dimensional Expressions LLC** (Ohio).
+Coding assisted with local LLM model
+
+Originally conceived and developed by **Coty Julien**.
 
 ## The doctrine
 
@@ -86,12 +94,29 @@ in its environment — an uploaded file should never own somebody's machine.
 - `src/transmute/gui/` — Qt shell; `controller.py` holds every decision and is Qt-free
 - `SPEC.md` / `ROADMAP.md` / `STATUS.md` — what it must do, what it will do, where we are
 
-## Licensing
+## License
 
-App code: Apache-2.0 (see `LICENSE`). Engines stay external and on your own
-system's packaging; this repository bundles **no** codec or engine binaries.
-`LICENSES.md` (added at P8 packaging) will be compiled from the actual
-fetched license texts of whatever we choose to bundle — never from memory.
+This project is distributed under the **Free Use Attribution License (FUAL-1.0)** — the same
+license as our [Duplicate Finder](https://github.com/Dimensionalexpressions/duplicate-finder).
+
+- Personal and other noncommercial use is free; **Attribution is required for all use** (credit + clickable link to this project).
+- Commercial use is free and does not require payment, royalties, or donations; it requires the same Attribution, including for internal company use.
+- You may modify the software and keep your modifications and proprietary additions private.
+- The software is provided "AS IS", without warranties, subject to the license terms.
+
+Read the complete [FUAL-1.0 license](LICENSE) before using or redistributing this project.
+
+### Required attribution for all use
+
+Include this notice in a reasonably accessible location appropriate to your product or deployment:
+
+> Originally conceived and developed by Coty Julien. Published by Dimensional Expressions LLC.  
+> Original project: [Transmute](https://github.com/Dimensionalexpressions/transmute)
+
+Engines (ffmpeg, Ghostscript, qpdf, LibreOffice, poppler, pandoc) stay external and on your own
+system's packaging; this repository bundles **no** codec or engine binaries, and every third-party
+component keeps its own license. When redistributing the software, include
+`THIRD-PARTY-NOTICES.md` (or an equivalent notice) as well (FUAL-1.0 §6).
 
 <!-- report-a-bug:start -->
 ## Report a bug

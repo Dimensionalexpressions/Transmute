@@ -80,7 +80,13 @@
           meta = with pkgs.lib; {
             description = "Media & document converter that adapts to the machine it runs on";
             homepage = "https://github.com/Dimensionalexpressions/transmute";
-            license = licenses.asl20; # switch in lockstep with the repo LICENSE
+            license = {
+              shortName = "FUAL-1.0";
+              fullName = "Free Use Attribution License 1.0 (see LICENSE)";
+              free = true;
+              redistributable = true;
+              deprecated = false;
+            }; # same license as the duplicate-finder family
             platforms = platforms.linux;
             mainProgram = "transmute";
           };

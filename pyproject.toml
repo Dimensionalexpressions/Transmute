@@ -4,13 +4,13 @@ version = "0.2.0"
 description = "Transmute - open-source media & document converter that adapts to the machine it runs on (runtime capability probing, verify-before-replace, resource governor)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
-authors = [{ name = "The Transmute Project" }]
+license = { text = "FUAL-1.0" }
+authors = [{ name = "Coty Julien", email = "kieros@cekfam.com" }]
 keywords = ["converter", "ffmpeg", "av1", "webp", "opus", "pdf", "media"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Environment :: Console",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: Other/Proprietary License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia",

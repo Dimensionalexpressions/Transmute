@@ -22,3 +22,7 @@ a public issue. It does not read the contents of your files.
 
 If the problem involves a specific file, please offer it as a sample — behaviour usually
 depends on the file. If the file is personal, say so and it can be sent privately.
+
+On Windows, run it from **Git Bash** if you have it (it comes with Git for Windows).
+Without bash, just write your Windows version and where the folder lives — that already
+answers most of what a fix needs.

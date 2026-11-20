@@ -50,7 +50,9 @@ if [ -z "$PROJECT" ]; then
     PROJECT=transmute
   elif [ -f "$ROOT/scripts/camera_probe.py" ] || [ -f "$ROOT/app/facecam_relay.py" ]; then
     PROJECT=facecam
-  elif [ -d "$ROOT/dupe_finder" ] || have dupe-finder; then
+  elif [ -f "$ROOT/linux/dupe_finder.py" ] || [ -f "$ROOT/windows/dupe_finder.py" ] \
+       || [ -d "$ROOT/dupe_finder" ] || have dupe-finder \
+       || { [ -f "$ROOT/pyproject.toml" ] && grep -qm1 'name = "duplicate-finder"' "$ROOT/pyproject.toml"; }; then
     PROJECT=dupefinder
   else
     PROJECT=generic
@@ -58,27 +60,45 @@ if [ -z "$PROJECT" ]; then
 fi
 
 TMP=$(mktemp "${TMPDIR:-/tmp}/bugreport.XXXXXX")
-trap 'rm -f "$TMP"' EXIT
+trap 'rm -f "$TMP" "${MASKSCRIPT:-}"' EXIT
 
 # A probe that hangs must never hang the report.
 if have timeout; then TOUT=timeout; else TOUT=""; fi
 
+# esc <text> — make text safe to embed as a sed pattern (names and paths are treated as literals).
+esc() { printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|&#]/\\&/g'; }
+
+# Build the masking rules once.  Each rule is only written when it has something to match, because
+# an empty sed pattern silently reuses the previous rule and masks the wrong thing.
+MASKSCRIPT=$(mktemp "${TMPDIR:-/tmp}/bugreport-mask.XXXXXX")
+{
+  [ -n "${HOME:-}" ]        && printf 's#%s#~#g\n' "$(esc "$HOME")"
+  [ -n "${USER:-}" ]        && printf 's#%s#<user>#g\n' "$(esc "$USER")"
+  uname=$(id -un 2>/dev/null || true)
+  [ -n "$uname" ]           && printf 's#%s#<user>#g\n' "$(esc "$uname")"
+  hn=$(hostname 2>/dev/null || true)
+  [ -n "$hn" ]              && printf 's#%s#<host>#g\n' "$(esc "$hn")"
+  # Windows paths reach the report when this runs in Git Bash: C:\Users\name and \\server\share.
+  printf 's#[A-Za-z]:[\\/][Uu]sers[\\/][^"[:space:]:]*#<user-home>#g\n'
+  printf 's#[Uu]sers[\\/][^"[:space:]/\\\\]*#<user-home>#g\n'
+  # Disk and volume UUIDs are unique to one machine; a maintainer only needs to know they match.
+  printf 's#[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}#<uuid>#g\n'
+} > "$MASKSCRIPT"
+
 mask() {
   # Names, home folder, host and disk UUIDs are masked so the block is safe to paste into a
   # public issue.  Use --full to keep them (private threads, or when you are the maintainer).
-  if [ "$MASK" = "1" ]; then
-    sed -E -e "s#$HOME#~#g" -e "s#$(id -un 2>/dev/null)#<user>#g" -e "s#$(hostname 2>/dev/null)#<host>#g" \
-        -e "s#[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}#<uuid>#g"
-  else
-    cat
-  fi
+  if [ "$MASK" = "1" ]; then sed -E -f "$MASKSCRIPT"; else cat; fi
 }
 
 # run <label> <command...> — missing tools produce a clear note instead of a gap.
+# Carriage returns are stripped because this script also runs in Git Bash on Windows, where every
+# Windows tool outputs CRLF and the block would paste with stray ^M characters.
 run() {
   label="$1"; shift
-  if [ -z "$TOUT" ]; then out=$("$@" 2>&1 | mask || true)
-  else out=$($TOUT 5 "$@" 2>&1 | mask || true); fi
+  label=$(printf '%s' "$label" | mask)   # labels carry user-supplied paths, so they are masked too
+  if [ -z "$TOUT" ]; then out=$("$@" 2>&1 | mask | tr -d '\r' || true)
+  else out=$($TOUT 5 "$@" 2>&1 | mask | tr -d '\r' || true); fi
   [ -n "$out" ] || out="(no output)"
   printf '\n### %s\n```\n%s\n```\n' "$label" "$out" >> "$TMP"
 }
@@ -103,6 +123,9 @@ END="----- 8< ----- END bugreport"
 # --- the machine ----------------------------------------------------------------------------
 if [ -r /etc/os-release ]; then
   run "operating system" grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+elif have cmd.exe; then
+  # Git Bash on Windows has no /etc/os-release; the Windows build matters more than anything else here.
+  run "operating system" cmd.exe /c ver
 fi
 run "kernel, cpu, cores" sh -c "uname -a; echo; LC_ALL=C grep -m1 'model name' /proc/cpuinfo; echo cores: \$(nproc)"
 run "memory" sh -c "free -h | head -2"
@@ -155,7 +178,15 @@ case "$PROJECT" in
     run "the Facecam on the USB bus" sh -c "lsusb 2>/dev/null | grep -i '0fd9' || echo 'Elgato (0fd9:0078) not visible'"
     ;;
   dupefinder)
-    run "Qt binding (if any)" sh -c "python3 -c 'import PySide6; print(\"PySide6\", PySide6.__version__)' 2>&1 | head -2"
+    # Duplicate Finder removes or moves files it is confident are duplicates, so a report has to say
+    # what the scanned location really is (its filesystem, its case behaviour) and which build ran.
+    if [ -f "$ROOT/version.txt" ]; then
+      run "app version (version.txt)" sh -c "cat \"\$1\"" sh "$ROOT/version.txt"
+    fi
+    run "python3 visible to this shell (a packaged build does not use it)" sh -c "python3 -c 'import sys,os; print(\"bundled\" if getattr(sys,\"frozen\",False) else \"from source\", os.path.basename(sys.executable))' 2>&1 | head -2"
+    run "PySide6 visible to this shell" sh -c "python3 -c 'import PySide6; print(\"PySide6\", PySide6.__version__)' 2>&1 | head -2"
+    run "file-name encoding seen by this shell (a packaged build may differ)" sh -c "python3 -c 'import sys; e=sys.getfilesystemencoding(); print(\"encoding\", e)' 2>&1 | head -2"
+    run "recycle bin / trash available for recovery" sh -c 'ls -d "$HOME/.local/share/Trash" 2>/dev/null; command -v trash-put gio powershell.exe 2>/dev/null; echo "(a missing tool means deleted files have nowhere to go)"'
     ;;
 esac
 
@@ -165,6 +196,23 @@ for p in $PATHS .; do
   if [ -e "$p" ]; then
     run "filesystem behind $p" sh -c "df -hT -- '$p' | tail -2; echo; stat -f -c 'fstype=%T  blocksize=%s  free=%a blocks' -- '$p'"
     run "permissions on $p" sh -c "ls -ld -- '$p' 2>&1"
+    # A duplicate finder that treats Foo.txt and foo.txt as the same file destroys data on
+    # case-insensitive media (NTFS, exFAT USB sticks, SMB shares).  This measures it instead of
+    # assuming it from the operating system.  It writes one temporary file that it deletes again.
+    if [ "$PROJECT" = dupefinder ] && [ -w "$p" ]; then
+      probe=$(mktemp "$p/.bugreport-case-XXXXXX" 2>/dev/null || true)
+      if [ -n "$probe" ]; then
+        dir=$(dirname "$probe"); base=$(basename "$probe")
+        if [ "$base" != "$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')" ] \
+           && [ -e "$dir/$(printf '%s' "$base" | tr '[:lower:]' '[:upper:]')" ]; then
+          verdict="case-INSENSITIVE here: names differing only in letter case are the same file"
+        else
+          verdict="case-SENSITIVE here: Foo.txt and foo.txt would be different files"
+        fi
+        rm -f "$probe"
+        printf '\n### case behaviour of that location\n%s\n' "$verdict" >> "$TMP"
+      fi
+    fi
   else
     printf '\n### path %s — does not exist on this machine\n' "$(printf '%s' "$p" | mask)" >> "$TMP"
   fi

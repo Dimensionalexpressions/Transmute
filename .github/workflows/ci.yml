@@ -1,10 +1,22 @@
 name: CI
 
 # P5 gate: the SAME suite must go green against at least two different ffmpeg
-# builds — the distro's (apt) and a pinned static GPL build with different
-# encoder availability. qpdf/pandoc/poppler/gs/LaTeX come from apt so the
-# real-engine tests (tests/test_real_external_engines.py) actually RUN here,
-# and a step fails the job if they skip.
+# builds — the distro's (apt) and nixpkgs' pinned ffmpeg_7 (7.1.x, a different
+# build configuration with different encoder availability). qpdf/pandoc/
+# poppler/gs/LaTeX come from apt so the real-engine tests
+# (tests/test_real_external_engines.py) actually RUN here, and a step fails the
+# job if they skip.
+#
+# ffmpeg 7.1 pin history (measured 2026-11): the previous source, BtbN's
+# FFmpeg-Builds pinned release FFmpeg-n7.1.1, is gone upstream — the repo moved
+# to FFmpeg-Builds/FFmpeg-Builds and every versioned release was deleted.
+# nixpkgs-by-revision is pinned AND served from cache.nixos.org, so this job
+# no longer depends on any third party keeping old assets alive.
+#
+# Exit-code doctrine: pytest can segfault at interpreter shutdown (Qt offscreen
+# teardown) AFTER printing a green summary. Suite steps write a junit XML and
+# let tools/ci_result_guard.py judge the XML, tolerating only known teardown
+# crash codes — see that file's docstring for the measured evidence.
 
 on:
   push:
@@ -20,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ffmpeg: [distro, static-7.1]
+        ffmpeg: [distro, nix-7.1]
     env:
       QT_QPA_PLATFORM: offscreen
 
@@ -44,19 +56,18 @@ jobs:
         if: matrix.ffmpeg == 'distro'
         run: sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: "ffmpeg flavour: pinned static build (BtbN FFmpeg-n7.1.1 GPL)"
-        if: matrix.ffmpeg == 'static-7.1'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: "ffmpeg flavour: nixpkgs (determinate nix installer)"
+        if: matrix.ffmpeg == 'nix-7.1'
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: "install rev-pinned nixpkgs ffmpeg_7 (7.1.5; binary cache serves it)"
+        if: matrix.ffmpeg == 'nix-7.1'
         run: |
           set -euo pipefail
-          # Tag is pinned; asset names embed a build hash, so glob them.
-          gh release download FFmpeg-n7.1.1 --repo BtbN/FFmpeg-Builds \
-            --pattern 'ffmpeg-n7.1*-linux64-gpl-7.1.tar.xz' --dir /tmp/ff
-          mkdir -p /opt/ffmpeg
-          tar -xf /tmp/ff/ffmpeg-n7.1*-linux64-gpl-7.1.tar.xz \
-            -C /opt/ffmpeg --strip-components=1
-          echo "/opt/ffmpeg/bin" >> "$GITHUB_PATH"
+          # Rev pinned 2026-11-20: verified ffmpeg_7 = 7.1.5 at this nixos-unstable rev.
+          nix profile install --accept-flake-config \
+            'github:NixOS/nixpkgs/04906337b6d53e8bb0eaf0470ae9f0470ae9f070a4d4eb55#ffmpeg_7'
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
 
       - name: Show the engine matrix this job really has
         run: |
@@ -73,17 +84,14 @@ jobs:
         run: pip install -e ".[dev,gui]"
 
       - name: Test suite (all tiers except slow)
-        run: python -m pytest -q -m "not slow"
+        run: |
+          rc=0; python -m pytest -q -m "not slow" --junitxml=results.xml || rc=$?
+          python tools/ci_result_guard.py results.xml "$rc"
 
       - name: Real-engine coverage must RUN, not skip
         run: |
-          set -euo pipefail
-          out=$(python -m pytest -q tests/test_real_external_engines.py -rs 2>&1)
-          echo "$out"
-          if echo "$out" | grep -qi skipped; then
-            echo "::error::qpdf/pandoc real tests skipped on CI - coverage missing"
-            exit 1
-          fi
+          rc=0; python -m pytest -q tests/test_real_external_engines.py --junitxml=real.xml || rc=$?
+          python tools/ci_result_guard.py real.xml "$rc" --no-skips
 
   # P6 gate: the SAME suite goes green on Windows, and the Windows governor
   # load test (real Job Object, real busy-loop children, measured CPU) RUNS -
@@ -116,15 +124,16 @@ jobs:
           python -c "from transmute.probe.engines import EngineManager; [print(r['name'], r['status'], r['path'], r['version'], sep=' | ') for r in EngineManager().status_table()]"
 
       - name: Test suite (all tiers except slow)
-        run: python -m pytest -q -m "not slow"
+        shell: pwsh
+        run: |
+          python -m pytest -q -m "not slow" --junitxml=results.xml
+          python tools/ci_result_guard.py results.xml $LASTEXITCODE
 
       - name: Governor load test - real Job Object cap must RUN and hold
         shell: pwsh
         timeout-minutes: 12
         run: |
-          python -m pytest -q tests/test_governor_windows.py -rs | Tee-Object -FilePath wjo.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }   # cap assertion failed
-          if (Select-String -Path wjo.log -Pattern "skipped" -Quiet) {
-            echo "::error::Windows governor load test skipped - gate not covered"
-            exit 1
-          }
+          python -m pytest -q tests/test_governor_windows.py --junitxml=wjo.xml
+          # --no-skips: on a real runner (unlike a nested-Job container) attach
+          # succeeds, so every governor test must actually run here.
+          python tools/ci_result_guard.py wjo.xml $LASTEXITCODE --no-skips

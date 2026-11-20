@@ -40,26 +40,44 @@ def main(argv):
         return 1
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     tests = failures = errors = skipped = 0
-    failed_names = []
+    failed = []  # (name, first-line assertion message)
     for s in suites:
         tests += int(s.get("tests", 0))
         failures += int(s.get("failures", 0))
         errors += int(s.get("errors", 0))
         skipped += int(s.get("skipped", 0))
         for tc in s.iter("testcase"):
-            if tc.find("failure") is not None or tc.find("error") is not None:
-                failed_names.append(f"{tc.get('classname')}::{tc.get('name')}")
+            node = tc.find("failure")
+            if node is None:
+                node = tc.find("error")
+            if node is not None:
+                name = f"{tc.get('classname')}::{tc.get('name')}"
+                msg = (node.get("message") or (node.text or "")).strip()
+                msg = msg.splitlines()[0][:60] if msg else "?"
+                # ':' would break nothing, but ';' and ' | ' are our separators
+                msg = msg.replace(";", ",").replace(" | ", " ")
+                failed.append((name, msg))
 
     print(f"guard: xml says tests={tests} failures={failures} "
           f"errors={errors} skipped={skipped}; rc={rc}")
 
     if failures or errors:
         print(f"::error::pytest produced {failures} failures / {errors} errors")
-        # Public channel: runner logs need a token, annotations do not.
-        for name in failed_names[:12]:
-            print(f"::error::FAILED {name}")
-        if len(failed_names) > 12:
-            print(f"::error::... and {len(failed_names) - 12} more, see junit xml")
+        # Public channel: runner logs need a token, annotations do not. The
+        # runner CAPS error annotations at 10 (measured run 44817220902: 12
+        # FAILED lines emitted, only 8 arrived) - so pack EVERY name with its
+        # assertion message into few dense chunks (~9 each), never more than
+        # the cap once the summary/tail annotations are counted.
+        chunk, lines = [], []
+        for name, msg in failed:
+            chunk.append(f"{name} :: {msg}")
+            if len(chunk) >= 9:
+                lines.append(chunk); chunk = []
+        if chunk:
+            lines.append(chunk)
+        for i, part in enumerate(lines):
+            print("::error::FAIL "
+                  f"{i * 9}-{i * 9 + len(part) - 1}: " + " ;; ".join(part))
         return 1
     if tests == 0:
         print("::error::junit xml has zero tests - suite never ran")

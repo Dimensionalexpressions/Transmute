@@ -101,6 +101,10 @@ def test_communicate_bounded_deadline_beats_pipe_holding_grandchild():
     finally:
         _terminate_tree(proc)
     time.sleep(0.5)
-    left = subprocess.run(["pgrep", "-f", "sleep 120"],
+    # -fx exact full-command: "-f sleep 120" also matched an unrelated
+    # `bash -c "... sleep 120; ..."` watcher script on the dev box (false
+    # leak report, run of 2026-11-20). The grandchild's argv IS exactly
+    # "sleep 120", so exactness loses nothing.
+    left = subprocess.run(["pgrep", "-fx", "sleep 120"],
                           capture_output=True, text=True)
     assert left.stdout.strip() == "", "grandchild survived the group kill"

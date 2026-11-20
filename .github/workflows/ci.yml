@@ -157,10 +157,11 @@ jobs:
           # gives a crashing interpreter one less way to die AFTER the green
           # junit xml exists.
           @'
-          import subprocess, sys
+          import os, subprocess, sys
           def crumb(s):
               open("breadcrumb.txt", "w").write(s)
           crumb("wrapper-start")
+          env = dict(os.environ, PYTHONFAULTHANDLER="1")
           with open("pytest_out.txt", "wb") as out:
               crumb("pytest-spawning")
               try:
@@ -168,9 +169,10 @@ jobs:
                                        "-v", "--tb=line",
                                        "-m", "not slow",
                                        "-p", "no:cacheprovider",
+                                       "-p", "faulthandler",
                                        "--junitxml=results.xml"],
                                       stdout=out, stderr=subprocess.STDOUT,
-                                      timeout=1500).returncode
+                                      timeout=1500, env=env).returncode
               except subprocess.TimeoutExpired:
                   rc = 124
               crumb("pytest-done rc=%d" % rc)

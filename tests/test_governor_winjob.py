@@ -223,6 +223,27 @@ def test_windows_governor_uses_job_object_and_is_testable_here(win_gov):
     assert f"close:{jobh}" in api.calls   # KILL_ON_JOB_CLOSE safety net on exit
 
 
+def test_windows_governor_attach_refusal_is_reported_while_active(win_gov):
+    # Measured on a runner whose session tree already lives in a Job that
+    # forbids nesting: AssignProcessToJobObject -> "Access is denied".
+    # The job stays active for whoever CAN attach, but the refusal must be
+    # loud: status() names it, a caveat explains the uncapped fallback.
+    api = FakeApi(fail={"open:1"})
+    g = _win_governor(api)
+    assert g.register_child(1) is not None       # tracked for suspend/resume
+    wjo = g.status()["windows_job_object"]
+    assert wjo.startswith("active")
+    assert "ATTACH REFUSED for 1 child(ren)" in wjo
+    assert "denied by policy" in wjo
+    assert any("attach refused" in c and "uncapped" in c for c in g.caveats)
+    assert g._job.status()["attach_refused"] == 1
+    # a later child that CAN attach is capped normally; refusal count stands
+    assert g.register_child(2) is not None
+    assert 2 in g._job.assigned_pids
+    assert "ATTACH REFUSED for 1 child(ren)" in g.status()["windows_job_object"]
+    g.stop()
+
+
 def test_windows_governor_falls_back_to_suspend_resume(win_gov, monkeypatch):
     api = FakeApi(fail={"create_job"})
     g = _win_governor(api)
@@ -244,6 +265,9 @@ def test_windows_governor_falls_back_to_suspend_resume(win_gov, monkeypatch):
     g.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="asserts the Linux host (posix enforcement path); "
+                           "the Linux CI job owns this guarantee")
 def test_linux_governor_unchanged_by_p6():
     g = ResourceGovernor()
     assert g.win is False and g.posix is True and g.enforceable

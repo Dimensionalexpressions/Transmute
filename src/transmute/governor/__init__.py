@@ -152,10 +152,20 @@ class ResourceGovernor:
         return token
 
     def _note_degraded(self) -> None:
-        if self._job is None or self._job.active:
+        if self._job is None:
             return
-        note = (f"Windows Job Object cap unavailable ({self._job.error}); "
-                "using suspend/resume feedback instead")
+        if not self._job.active:
+            note = (f"Windows Job Object cap unavailable ({self._job.error}); "
+                    "using suspend/resume feedback instead")
+        elif self._job.attach_refused:
+            # Job exists but the OS refused to move children into it (e.g.
+            # a container/session job that forbids nesting - measured
+            # "Access is denied"). The cap covers 0 of them; say so.
+            note = (f"Windows Job Object attach refused "
+                    f"({self._job.attach_error}); those children run "
+                    "uncapped - suspend/resume feedback still covers them")
+        else:
+            return
         if note not in self.caveats:
             self.caveats.append(note)
 
@@ -283,6 +293,11 @@ class ResourceGovernor:
             wjo = (f"active: kernel hard cap {self._job.cap_pct:.0f}% of total CPU, "
                    f"{len(self._job.assigned_pids)} child(ren) assigned, kill-on-close; "
                    f"IO priority: {self._job.io_state()}")
+            if self._job.attach_refused:
+                # "active" + honest coverage: refused children are NOT capped.
+                wjo += (f"; ATTACH REFUSED for {self._job.attach_refused} "
+                        f"child(ren) ({self._job.attach_error}) - those "
+                        "children run uncapped")
         else:
             wjo = f"unavailable ({self._job.error}); suspend/resume feedback in use"
         return {"enabled": self.enabled, "platform": sys.platform,

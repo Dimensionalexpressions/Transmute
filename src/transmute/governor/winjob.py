@@ -198,6 +198,12 @@ class WinJob:
         self.assigned_pids: set[int] = set()
         self.io_low_pids: set[int] = set()
         self.io_error: str | None = None
+        # Attach refusals (e.g. a parent Job Object that forbids nesting -
+        # measured on a container-hosted runner: AssignProcessToJobObject ->
+        # "Access is denied") do NOT tear the cap down; they are COUNTED and
+        # surfaced so "active" never silently overstates what is covered.
+        self.attach_refused = 0
+        self.attach_error: str | None = None
 
     def _get_api(self):
         if self.api is not None:
@@ -251,6 +257,8 @@ class WinJob:
             self.assigned_pids.add(pid)
             return True
         except WinJobError as exc:
+            self.attach_refused += 1
+            self.attach_error = str(exc)
             self._record(f"attach pid {pid}: {exc}")
             return False
 
@@ -277,7 +285,9 @@ class WinJob:
     def status(self) -> dict:
         return {"active": self.active, "cap_pct": self.cap_pct,
                 "assigned": sorted(self.assigned_pids), "error": self.error,
-                "io_low": sorted(self.io_low_pids), "io_error": self.io_error}
+                "io_low": sorted(self.io_low_pids), "io_error": self.io_error,
+                "attach_refused": self.attach_refused,
+                "attach_error": self.attach_error}
 
     def io_state(self) -> str:
         """Human-readable IO-priority state for status()/caveats."""
@@ -285,7 +295,12 @@ class WinJob:
             base = f"LOW on {len(self.io_low_pids)} child(ren)"
             return base + (f"; refused for later children ({self.io_error})"
                            if self.io_error else "")
-        return f"not applied ({self.io_error})" if self.io_error else "no children yet"
+        if self.io_error:
+            return f"not applied ({self.io_error})"
+        if self.attach_refused:
+            # No child could be IO-prioritised: none could even be attached.
+            return f"not applied (attach refused: {self.attach_error})"
+        return "no children yet"
 
     def close(self) -> None:
         if self.job is not None:

@@ -39,6 +39,12 @@ jobs:
           python-version: "3.12"
       - name: Install build-only tools (PyInstaller is NEVER a runtime dep)
         run: |
+          # System GL/X/DBus/font libs are BUILD-side inputs: they exist in the
+          # build env so PyInstaller collects them INTO the bundle, making the
+          # tarball self-contained (verified smoke-free on pristine 24.04).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libglib2.0-0t64
           python -m pip install -U pip
           # Essentials only: src/ imports nothing beyond QtCore/QtGui/QtWidgets.
           python -m pip install -e . PySide6-Essentials pyinstaller
@@ -47,20 +53,15 @@ jobs:
           pyinstaller --noconfirm --clean --onedir --windowed \
             --name Transmute --collect-all transmute \
             packaging/launch_gui.py
-      - name: Smoke - frozen GUI must start and stay alive headless
+      - name: Smoke - frozen GUI on a PRISTINE ubuntu:24.04 (the documented floor)
+        # Zero package installs inside: if the bundle needs anything beyond
+        # the 24.04 base, it is NOT self-contained and must not ship while
+        # the README promises "glibc >= 2.39 is all you need".
         run: |
-          ldd ./dist/Transmute/Transmute 2>/dev/null | grep 'not found' \
-            | sed 's/^/::warning::missing-lib /' || echo "all dynamic deps resolve"
-          QT_QPA_PLATFORM=offscreen ./dist/Transmute/Transmute >/tmp/smoke.log 2>&1 &
-          P=$!
-          sleep 12
-          if kill -0 "$P" 2>/dev/null; then
-            echo "::notice::linux frozen GUI alive after 12s"; kill "$P"
-          else
-            RC=1; wait "$P" 2>/dev/null || RC=$?
-            echo "::error::frozen GUI exited early rc=$RC TAIL $(tail -c 450 /tmp/smoke.log | tr '\n' '~' | tr ':' '-')"
-            exit 1
-          fi
+          docker run --rm -v "$PWD/dist:/dist:ro" -e QT_QPA_PLATFORM=offscreen ubuntu:24.04 \
+            bash -c '/dist/Transmute/Transmute >/tmp/smoke.log 2>&1 & P=$!; sleep 12; \
+              if kill -0 $P 2>/dev/null; then echo "PRISTINE-2404 GUI ALIVE"; kill $P; exit 0; \
+              else RC=1; wait $P 2>/dev/null || RC=$?; tail -c 500 /tmp/smoke.log; echo "::error::frozen GUI died rc=$RC on pristine 24.04 - bundle is not self-contained"; exit 1; fi'
       - name: Pack + checksum
         run: |
           tar -C dist -czf Transmute-linux-x86_64.tar.gz Transmute
@@ -139,7 +140,7 @@ jobs:
           fi
       - name: Smoke before publish
         run: |
-          if ! docker run -d --name s -e TRANSMUTE_TOKEN=*** -p 127.0.0.1:18765:8765 "$IMG:$TAG" >/tmp/dr.log 2>&1; then
+          if ! docker run -d --name tm-smoke -e TRANSMUTE_TOKEN=*** -p 127.0.0.1:18765:8765 "$IMG:$TAG" >/tmp/dr.log 2>&1; then
             echo "::error::docker run failed: $(tr '\n' '~' </tmp/dr.log | cut -c1-450 | tr ':' '-')"
             exit 1
           fi
@@ -147,10 +148,10 @@ jobs:
           code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18765/ || echo curlfail)
           if [ "$code" != "200" ]; then
             echo "::error::serve smoke got $code logs $(docker logs s 2>&1 | tail -c 450 | tr '\n' '~' | tr ':' '-')"
-            docker rm -f s >/dev/null
+            docker rm -f tm-smoke >/dev/null
             exit 1
           fi
-          docker rm -f s >/dev/null
+          docker rm -f tm-smoke >/dev/null
           echo "::notice::serve smoke 200 OK"
       - name: Push
         run: |

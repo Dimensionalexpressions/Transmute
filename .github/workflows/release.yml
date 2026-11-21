@@ -53,23 +53,29 @@ jobs:
           pyinstaller --noconfirm --clean --onedir --windowed \
             --name Transmute --collect-all transmute \
             packaging/launch_gui.py
-      - name: Smoke - frozen GUI on a PRISTINE ubuntu:24.04 (the documented floor)
-        # Zero package installs inside: if the bundle needs anything beyond
-        # the 24.04 base, it is NOT self-contained and must not ship while
-        # the README promises "glibc >= 2.39 is all you need".
-        # The app's own error log goes INTO the annotation - the step log is
-        # not anonymously readable; only annotations are.
+      - name: Smoke - frozen GUI on ubuntu:24.04 + the documented GL floor
+        # PyInstaller deliberately does NOT bundle the OpenGL stack
+        # (depend/dylib.py _unix_excludes: "graphical interface libraries
+        # come with graphical stack (see libglvnd)") - because bundling GL
+        # dispatch over a machine's real GPU drivers is the classic breakage.
+        # Qt assumes the same. So the documented floor is glibc >= 2.39 +
+        # libGL/libEGL: present on every desktop Linux; headless boxes need
+        # `sudo apt install libgl1 libegl1` (README says exactly this).
+        # Nothing else may be installed for the smoke: any other missing
+        # library is a bundle regression and fails the job.
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" -e QT_QPA_PLATFORM=offscreen ubuntu:24.04 \
-            bash -c '/dist/Transmute/Transmute >/tmp/smoke.log 2>&1 & P=$!; sleep 12; \
+            bash -c 'apt-get update -qq >/dev/null 2>&1 || echo APT-UPDATE-FAIL; \
+              apt-get install -y -qq --no-install-recommends libgl1 libegl1 >/dev/null 2>&1 || echo APT-INSTALL-FAIL; \
+              /dist/Transmute/Transmute >/tmp/smoke.log 2>&1 & P=$!; sleep 12; \
               if kill -0 $P 2>/dev/null; then echo SMOKE-ALIVE; kill $P; \
               else wait $P; echo "DIED-RC=$?"; fi; echo --LOG--; tail -c 420 /tmp/smoke.log' \
             > /tmp/psmoke.out 2>&1 || true
           if grep -q SMOKE-ALIVE /tmp/psmoke.out; then
-            echo "::notice::pristine-2404 GUI alive"
+            echo "::notice::2404 + GL floor: GUI alive"
           else
-            MSG=$(sed -n '/--LOG--/,$p' /tmp/psmoke.out | tail -c 380 | tr '\n' '~' | tr ':' '-' | tr '%' 'P')
-            echo "::error::pristine-2404 died: $MSG"
+            MSG=$(tr '\n' '~' < /tmp/psmoke.out | tail -c 380 | tr ':' '-' | tr '%' 'P')
+            echo "::error::2404 smoke died: $MSG"
             exit 1
           fi
       - name: Pack + checksum

@@ -30,7 +30,7 @@ as needed); Transmute will find them on PATH.
 | How | Command / download | Notes |
 |---|---|---|
 | Windows binary | [Releases](https://github.com/Dimensionalexpressions/Transmute/releases) → `Transmute-windows-x86_64.zip` | unpack, run `Transmute.exe`; SHA256 in `SHA256SUMS.txt` |
-| Linux binary | same release → `Transmute-linux-x86_64.tar.gz` | built on Ubuntu 24.04 (glibc ≥ 2.39); `./Transmute/Transmute` |
+| Linux binary | same release → `Transmute-linux-x86_64.tar.gz` | needs glibc ≥ 2.39 (built on Ubuntu 24.04) plus the OpenGL libs `libGL`/`libEGL` — already present on every desktop Linux; headless servers: `sudo apt install libgl1 libegl1`. Run `./Transmute/Transmute` |
 | Nix / NixOS | `nix run github:Dimensionalexpressions/Transmute` | one-shot try; **engines baked into PATH by the flake** — nothing else to install |
 | Nix install | `nix profile install github:Dimensionalexpressions/Transmute#transmute` | adds `transmute` + `transmute-serve` to PATH |
 | Docker (serve mode) | `docker run -d -p 8765:8765 -v ./data:/data ghcr.io/dimensionalexpressions/transmute-serve:latest` | conversion core behind a browser on your LAN; engines baked in; see `docker/README.md` |

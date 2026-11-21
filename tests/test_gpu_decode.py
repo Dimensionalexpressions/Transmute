@@ -111,6 +111,17 @@ def test_trial_believed_only_when_frames_leave_the_cpu(tmp_path, monkeypatch):
             assert c.index("-hwaccel") < c.index("-i")
 
 
+@pytest.fixture()
+def all_devices_present(monkeypatch):
+    # Trial-scheduling tests ask "what does THIS OS allow" - a policy
+    # question answered by _decode_api_allowed's OS branches, not by whether
+    # the runner happens to expose GPU device nodes (GPU-less CI runners have
+    # none: v0.2.6.1 CI, both ffmpeg jobs). Device existence is stubbed; the
+    # fake ffmpeg still decides which trial wins, so no API name is hardcoded.
+    monkeypatch.setattr(cap, "_has_nvidia_nodes", lambda: True)
+    monkeypatch.setattr(cap, "_has_dri_render_node", lambda: True)
+
+
 def _allowed_decode_apis(exclude: str = "") -> set[str]:
     """Which device APIs THIS OS may trial - derived from production, never
     hardcoded per file (Windows CI ran these very trials' Linux list and
@@ -119,7 +130,8 @@ def _allowed_decode_apis(exclude: str = "") -> set[str]:
             if api != exclude and cap._decode_api_allowed(node)}
 
 
-def test_driver_decline_reported_never_claimed(tmp_path, monkeypatch):
+def test_driver_decline_reported_never_claimed(tmp_path, monkeypatch,
+                                               all_devices_present):
     # every allowed API accepted the flag, none produced GPU frames: honest NO
     calls = _fake_ffmpeg(monkeypatch, tmp_path, "yuv420p")
     r = _probe_gpu_decode(Path("ffmpeg"))
@@ -130,7 +142,8 @@ def test_driver_decline_reported_never_claimed(tmp_path, monkeypatch):
         == _allowed_decode_apis()
 
 
-def test_nvdec_declines_vaapi_takes_the_job(tmp_path, monkeypatch):
+def test_nvdec_declines_vaapi_takes_the_job(tmp_path, monkeypatch,
+                                            all_devices_present):
     # NVIDIA declines: another GPU API this OS allows (VA-API on Linux,
     # D3D11VA on Windows) takes the decode job
     winner = sorted(_allowed_decode_apis(exclude="cuda"))

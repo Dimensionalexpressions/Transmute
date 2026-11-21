@@ -85,3 +85,12 @@ def test_linux_conventional_dirs_unchanged(tmp_path, monkeypatch):
     dirs = [p.as_posix() for p in E._conventional_dirs()]
     assert "/usr/bin" in dirs
     assert not any("Program Files" in d or "\\PF" in d for d in dirs)
+
+
+def test_qpdf_version_re_accepts_argv0_echo():
+    # Some Windows qpdf builds echo argv[0]: "qpdf.EXE version 12.4.2"
+    # (WinBoat VM, 2026-11; the console-less frozen exe failed to parse it
+    # while qpdf on every Linux ever tested prints "qpdf version ...").
+    rx = E.KNOWN_ENGINES["qpdf"].version_re
+    assert rx.search("qpdf.EXE version 12.4.2").group(1) == "12.4.2"
+    assert rx.search("qpdf version 11.9.1").group(1) == "11.9.1"

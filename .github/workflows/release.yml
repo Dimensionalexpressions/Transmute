@@ -57,11 +57,21 @@ jobs:
         # Zero package installs inside: if the bundle needs anything beyond
         # the 24.04 base, it is NOT self-contained and must not ship while
         # the README promises "glibc >= 2.39 is all you need".
+        # The app's own error log goes INTO the annotation - the step log is
+        # not anonymously readable; only annotations are.
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" -e QT_QPA_PLATFORM=offscreen ubuntu:24.04 \
             bash -c '/dist/Transmute/Transmute >/tmp/smoke.log 2>&1 & P=$!; sleep 12; \
-              if kill -0 $P 2>/dev/null; then echo "PRISTINE-2404 GUI ALIVE"; kill $P; exit 0; \
-              else RC=1; wait $P 2>/dev/null || RC=$?; tail -c 500 /tmp/smoke.log; echo "::error::frozen GUI died rc=$RC on pristine 24.04 - bundle is not self-contained"; exit 1; fi'
+              if kill -0 $P 2>/dev/null; then echo SMOKE-ALIVE; kill $P; \
+              else wait $P; echo "DIED-RC=$?"; fi; echo --LOG--; tail -c 420 /tmp/smoke.log' \
+            > /tmp/psmoke.out 2>&1 || true
+          if grep -q SMOKE-ALIVE /tmp/psmoke.out; then
+            echo "::notice::pristine-2404 GUI alive"
+          else
+            MSG=$(sed -n '/--LOG--/,$p' /tmp/psmoke.out | tail -c 380 | tr '\n' '~' | tr ':' '-' | tr '%' 'P')
+            echo "::error::pristine-2404 died: $MSG"
+            exit 1
+          fi
       - name: Pack + checksum
         run: |
           tar -C dist -czf Transmute-linux-x86_64.tar.gz Transmute
@@ -125,13 +135,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Login to ghcr.io with the workflow token
-        run: |
-          if ! echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/tmp/dl.log 2>&1; then
-            echo "::error::ghcr login failed: $(tr '\n' '~' </tmp/dl.log | cut -c1-300 | tr ':' '-')"
-            exit 1
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # docker/login-action is the canonical ghcr credential path; raw
+        # `docker login` succeeded but the push was still DENIED - use the
+        # supported action and, if denied again, surface the registry's
+        # FULL error (previous annotation truncated it to "denied").
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build serve image (linux/amd64; documented, no false multi-arch)
         run: |
           if ! docker build -f docker/Dockerfile -t "$IMG:$TAG" -t "$IMG:latest" . >/tmp/db.log 2>&1; then
@@ -147,7 +159,7 @@ jobs:
           sleep 8
           code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18765/ || echo curlfail)
           if [ "$code" != "200" ]; then
-            echo "::error::serve smoke got $code logs $(docker logs s 2>&1 | tail -c 450 | tr '\n' '~' | tr ':' '-')"
+            echo "::error::serve smoke got $code logs $(docker logs tm-smoke 2>&1 | tail -c 450 | tr '\n' '~' | tr ':' '-')"
             docker rm -f tm-smoke >/dev/null
             exit 1
           fi
@@ -155,17 +167,16 @@ jobs:
           echo "::notice::serve smoke 200 OK"
       - name: Push
         run: |
+          san() { tail -c 600 "$1" | grep -a -iE 'denied|error|unauthorized|manifest' | tail -c 380 | tr '\n' '~' | tr ':' '-' | tr '%' 'P'; }
           if ! docker push "$IMG:$TAG" >/tmp/dp.log 2>&1; then
-            echo "::error::push $TAG failed: $(tail -c 400 /tmp/dp.log | tr '\n' '~' | tr ':' '-')"
+            echo "::error::push $TAG denied-full: $(san /tmp/dp.log)"
             exit 1
           fi
           if ! docker push "$IMG:latest" >>/tmp/dp.log 2>&1; then
-            echo "::error::push latest failed: $(tail -c 400 /tmp/dp.log | tr '\n' '~' | tr ':' '-')"
+            echo "::error::push latest denied-full: $(san /tmp/dp.log)"
             exit 1
           fi
           echo "::notice::image published $IMG:$TAG (+latest)"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   upload:
     needs: [binary-linux, binary-windows]

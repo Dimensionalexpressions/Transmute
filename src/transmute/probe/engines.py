@@ -165,6 +165,12 @@ def _conventional_dirs() -> list[Path]:
             # Ghostscript installs versioned: gs\gs10.13.0\bin - the bin part
             # was missing (P6 fix: candidates pointed at the VERSION dir).
             out += [g / "bin" for g in sorted(base.glob("gs/gs*"))]
+            # qpdf's own installer is versioned WITH A SPACE and files in
+            # bin\: "C:\Program Files\qpdf 12.4.2\bin" (winget manifest
+            # DefaultInstallLocation) - the fixed "qpdf\bin" above never
+            # matched, so installed qpdf still probed missing.
+            for q in sorted(base.glob("qpdf*")):
+                out += [q, q / "bin"]
             out += [base / "LibreOffice" / "program"]
             # Poppler Windows builds (oschwartz10612 etc) unzip to
             # poppler-*\Library\bin or poppler-*\bin.

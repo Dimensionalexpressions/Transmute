@@ -860,30 +860,33 @@ class TestQualityScaleFollowsEncoder:
 
 def test_throttle_checkbox_controls_queue_and_persists(window):
     """The governor exists but only ever runs when the user says so:
-    the checkbox is the single switch, it detaches the governor from the
-    queue immediately, and the choice survives restarts."""
-    assert window.chk_throttle.isChecked()          # considerate default
-    assert window.ctrl.queue.governor is window._governor
-    window.chk_throttle.setChecked(False)
+    unchecked by default (flat out unless asked - v0.2.4), the checkbox
+    is the single switch, it attaches/detaches immediately, and the
+    choice survives restarts. The label must state what/how much."""
+    assert not window.chk_throttle.isChecked()      # flat-out default
+    assert "CPU" in window.chk_throttle.text() and "80" in window.chk_throttle.text()
     assert window.ctrl.queue.governor is None
-    assert window._governor.enabled is False
-    assert window.ctrl.prefs().get("throttle") is False
     window.chk_throttle.setChecked(True)
     assert window.ctrl.queue.governor is window._governor
     assert window._governor.enabled is True
     assert window.ctrl.prefs().get("throttle") is True
+    window.chk_throttle.setChecked(False)
+    assert window.ctrl.queue.governor is None
+    assert window._governor.enabled is False
+    assert window.ctrl.prefs().get("throttle") is False
 
 
 def test_throttle_choice_survives_restart(qapp):
     from transmute.gui.app import MainWindow
     from test_gui_controller import _report
     probe = ConverterController(report_provider=_report)
-    probe.set_pref("throttle", False)
+    probe.set_pref("throttle", True)
     win = MainWindow()
     try:
-        assert win.chk_throttle.isChecked() is False
-        assert win.ctrl.queue.governor is None
+        assert win.chk_throttle.isChecked() is True   # saved ON survives
+        assert win.ctrl.queue.governor is win._governor
     finally:
         win.close()
-        # leave the default for any later test that assumes it
-        ConverterController(report_provider=_report).set_pref("throttle", True)
+        # back to off for any later test: no saved preference needed -
+        # off IS the default now, but the pref file must not stay ON.
+        ConverterController(report_provider=_report).set_pref("throttle", False)

@@ -188,7 +188,10 @@ class MainWindow(QMainWindow):
         # Nothing is deleted - the journal keeps every row as history.
         self._show_finished = False
         self._just_discarded: set[str] = set()
-        self.setWindowTitle("Transmute")
+        # version IN the title: on the stick/USB test rigs it is the only
+        # way to tell which build this window is (user ask).
+        from .. import __version__ as _VER
+        self.setWindowTitle(f"Transmute v{_VER}")
         self.resize(980, 640)
         self.setAcceptDrops(True)
         # serve mode: HTTP front door onto this same controller/queue,
@@ -210,8 +213,8 @@ class MainWindow(QMainWindow):
         # saved rules re-arm their watcher now that every widget exists
         self._restore_watch_folders()
         # bring the governor to the state the persisted checkbox asks for
-        # (off by default only if the user ever said so; new machines
-        # get the considerate behaviour, matching the README promise)
+        # (unchecked by default since v0.2.4 - flat out unless the user
+        # switched it on; their choice is what survives restarts)
         self._apply_throttle(self.chk_throttle.isChecked())
 
     # ------------------------------------------------------------- layout
@@ -341,17 +344,28 @@ class MainWindow(QMainWindow):
             "run any time.")
         self.btn_bench.clicked.connect(self._start_reprobe)
         rv.addRow("", self.btn_bench)
-        self.chk_throttle = QCheckBox("Throttle while converting")
+        # Label states plainly WHAT is throttled and HOW MUCH (user ask);
+        # unchecked by default - flat-out is the default, the choice stays
+        # remembered for anyone who turns it on. Numbers are the governor's
+        # real ones: _DEFAULT_CAP, RESUME margin, gpu_sessions=2.
+        from ..governor import _DEFAULT_CAP as _CAP
+        self.chk_throttle = QCheckBox(
+            "Throttle while converting — holds total CPU to %d%%, runs "
+            "disk at low priority, max 2 GPU encodes" % _CAP)
         self.chk_throttle.setToolTip(
-            "Checked (default): conversions stay under this machine's\n"
-            "measured CPU headroom, disk work runs at low priority, and\n"
-            "GPU encodes run as capped sessions - the PC stays usable.\n"
-            "Unchecked: engines run flat out - fastest, but ffmpeg\n"
-            "takes every core it can reach.\n"
-            "Applies to new conversions immediately; remembered.")
+            "While converting, when checked:\n"
+            "• CPU - engines pause whenever the WHOLE machine passes %d%%\n"
+            "  use and resume below %d%%, so your other apps keep their\n"
+            "  speed. (This machine's total CPU, not just our converters.)\n"
+            "• Disk - conversion file IO runs at low priority.\n"
+            "• GPU - at most 2 GPU encodes at once.\n"
+            "• RAM - not capped.\n"
+            "Unchecked (the default): engines run flat out - fastest, but\n"
+            "ffmpeg takes every core it can reach.\n"
+            "Applies to new conversions immediately; remembered."
+            % (_CAP, _CAP - 10.0))
         self.chk_throttle.setChecked(
-            bool(self.ctrl.prefs().get("throttle",
-                                       self._governor.enabled)))
+            bool(self.ctrl.prefs().get("throttle", False)))
         self.chk_throttle.toggled.connect(self._apply_throttle)
         rv.addRow("", self.chk_throttle)
         # benchmark progress: the measurement takes minutes on slow machines
@@ -1110,6 +1124,10 @@ class MainWindow(QMainWindow):
 
     def _reprobe_body(self) -> None:
         # OFF the GUI thread: touch no widgets; signal only.
+        # An engine installed since launch (even by winget mid-session)
+        # only reached the registry PATH - merge it so the re-benchmark
+        # sees reality, else "missing" entries never clear (qpdf report).
+        _installer.refresh_path_from_registry()
         err = ""
         try:
             self.ctrl.reprobe(

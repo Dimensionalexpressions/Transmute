@@ -487,15 +487,41 @@ def _probe_ffmpeg_filters(ffmpeg: Path) -> dict[str, bool]:
 # Ladder rung 1 (GPU decode offload): the engine adds -hwaccel ONLY when this
 # trial proves the machine really decodes H.264 on its GPU. cuda is tried
 # first where NVIDIA nodes exist (NVDEC); VA-API covers AMD/Intel render
-# nodes. Windows/other APIs (D3D11VA...) are a deliberate later rung.
+# nodes. On Windows the device model is D3D11: d3d11va/dxva2 need no nodes
+# (live-fire: Ryzen AI 9 HX 370 / Radeon 880M reported "no GPU decode
+# device nodes here" because only POSIX APIs were on this list).
 _DECODE_APIS: tuple[tuple[str, str], ...] = (("cuda", "nvidia"),
-                                             ("vaapi", "dri_render"))
+                                             ("vaapi", "dri_render"),
+                                             ("d3d11va", "win"),
+                                             ("dxva2", "win"))
+
+
+def _decode_api_allowed(node: str) -> bool:
+    """Gate a decode trial by this OS's device model. Windows has no
+    /dev/dri - D3D11VA/DXVA2 need nothing, and CUDA is worth a try on any
+    NVIDIA box even without POSIX nodes; the executed trial (frame-format
+    change) decides, never this gate alone."""
+    if sys.platform == "win32":
+        return node in ("win", "nvidia")
+    if node == "nvidia":
+        return _has_nvidia_nodes()
+    if node == "dri_render":
+        return _has_dri_render_node()
+    return False  # "win" APIs have no device model on POSIX to try
 
 
 def _decoded_pix_fmt(text: str) -> str:
     """Pixel format of the DECODED stream from ffmpeg's output stream line
     ("Video: wrapped_avframe, nv12(...)"). Empty when the line is absent."""
     m = re.search(r"Video:\s+\S+,\s*([a-z0-9_]+)[,(]", text or "")
+    return m.group(1) if m else ""
+
+
+def _hwaccel_route(text: str) -> str:
+    """The GPU-side format in ffmpeg's decode route, "(cuda -> nv12)" /
+    "(d3d11va -> d3d11)" - the arrow only appears when an hwaccel decoded.
+    Empty for plain CPU decode (no arrow on the stream line)."""
+    m = re.search(r"\([a-z0-9_]+\s*->\s*([a-z0-9_]+)\)", text or "")
     return m.group(1) if m else ""
 
 
@@ -531,16 +557,20 @@ def _probe_gpu_decode(ffmpeg: Path) -> dict[str, Any]:
                               "compare a GPU trial against"}
         notes: list[str] = []
         for api, node in _DECODE_APIS:
-            if node == "nvidia" and not _has_nvidia_nodes():
-                continue
-            if node == "dri_render" and not _has_dri_render_node():
+            if not _decode_api_allowed(node):
                 continue
             res = run_command([ffmpeg, "-hide_banner", "-nostdin",
                                "-hwaccel", api, "-i", sample,
                                "-f", "null", "-"],
                               timeout_s=60, gpu=True)
             fmt = _decoded_pix_fmt(res.stderr_text)
-            if res.ok and fmt and fmt != base_fmt:
+            # Windows caveat: -f null DOWNLOADS GPU frames, so the output
+            # format can be the plain yuv420p baseline even though the GPU
+            # decoded. ffmpeg's stream line routes the work honestly:
+            # "(d3d11va -> d3d11)" - a GPU intermediate format is believed.
+            route = _hwaccel_route(res.stderr_text)
+            gpu_evidence = bool(route and route not in ("yuv420p", "none"))
+            if res.ok and ((fmt and fmt != base_fmt) or gpu_evidence):
                 return {"attempted": True, "available": True, "api": api,
                         "reason": ""}
             if res.ok:

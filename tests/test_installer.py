@@ -81,3 +81,33 @@ def test_already_installed_is_success_not_failure():
     # a genuinely failed install stays a failure
     assert not ins.install_succeeded(5, False, "package not found")
     assert not ins.install_code_is_already_installed(5)
+
+
+def test_qpdf_versioned_install_dir_is_searched(tmp_path, monkeypatch):
+    # winget QPDF.QPDF = NSIS installer: DefaultInstallLocation
+    # "%ProgramFiles%qpdf 12.4.2" (SPACE) with the EXE under bin\. The
+    # fixed "qpdf\bin" probe never looked there, so installed qpdf kept
+    # showing as missing (and the caveats listed qpdf repair/optimise).
+    from transmute.probe import engines as eng
+    prog = tmp_path / "Program Files"
+    exe = prog / "qpdf 12.4.2" / "bin" / "qpdf.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(eng, "_IS_WINDOWS", True)
+    monkeypatch.setitem(os.environ, "ProgramFiles", str(prog))
+    monkeypatch.setitem(os.environ, "ProgramW6432", str(prog))
+    monkeypatch.delitem(os.environ, "ProgramFiles(x86)", raising=False)
+    dirs = eng._conventional_dirs()
+    assert exe.parent in dirs
+
+
+def test_soffice_never_resolves_to_the_com_console_shim(tmp_path, monkeypatch):
+    # soffice.COM is a console wrapper that prompts "press any key" and
+    # hangs headless - shutil.which follows PATHEXT and finds .COM first.
+    # On Windows the probe must ask for soffice.exe explicitly.
+    from transmute.probe import engines as eng
+    monkeypatch.setattr(eng, "_IS_WINDOWS", True)
+    spec = eng.KNOWN_ENGINES["libreoffice"]
+    names = eng._names_for(spec)
+    assert "soffice.exe" in names
+    assert "soffice" not in names           # bare name = PATHEXT roulette

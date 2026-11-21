@@ -182,3 +182,39 @@ def test_engine_offloads_decode_only_where_proven(tmp_path, fixtures,
     assert main, seen
     assert "-hwaccel" in main[0][:main[0].index("-i")]
     assert main[0][main[0].index("-hwaccel") + 1] == verdict["api"]
+
+
+# --- v0.2.5: the Windows decode rung (live-fire: Ryzen AI 9 HX 370 / ---
+# --- Radeon 880M said "no GPU decode device nodes here" - POSIX-only list)
+
+def test_windows_decode_apis_are_on_the_ladder():
+    from transmute.probe import capability as cap
+    apis = [a for a, _ in cap._DECODE_APIS]
+    assert "d3d11va" in apis and "dxva2" in apis
+
+
+def test_decode_gate_follows_the_os_device_model(monkeypatch):
+    import sys as _sys
+    from transmute.probe import capability as cap
+    monkeypatch.setattr(_sys, "platform", "win32")
+    assert cap._decode_api_allowed("win")            # D3D11: no nodes needed
+    assert cap._decode_api_allowed("nvidia")         # NVDEC exists sans /dev
+    assert not cap._decode_api_allowed("dri_render")  # no vaapi on Windows
+    monkeypatch.setattr(_sys, "platform", "linux")
+    monkeypatch.setattr(cap, "_has_dri_render_node", lambda: False)
+    monkeypatch.setattr(cap, "_has_nvidia_nodes", lambda: False)
+    assert not cap._decode_api_allowed("dri_render")
+    assert not cap._decode_api_allowed("nvidia")
+
+
+def test_hwaccel_route_is_the_windows_decode_evidence():
+    from transmute.probe import capability as cap
+    win_gpu = ("Stream #0:0: Video: h264 (native) (d3d11va -> d3d11), "
+               "yuv420p(progressive), 640x480, 25 fps")
+    cpu = ("Stream #0:0: Video: h264 (native), yuv420p(progressive), "
+           "640x480, 25 fps")
+    # -f null DOWNLOADS frames: output fmt looks CPU-equal either way,
+    # only the route proves GPU work happened.
+    assert cap._decoded_pix_fmt(win_gpu) == cap._decoded_pix_fmt(cpu)
+    assert cap._hwaccel_route(win_gpu) == "d3d11"
+    assert cap._hwaccel_route(cpu) == ""

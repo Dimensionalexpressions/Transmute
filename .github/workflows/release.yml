@@ -198,14 +198,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
+          # No checkout in this job -> gh cannot infer the repo from a
+          # git remote; every gh call must carry --repo explicitly.
+          # (First failure of this job died silently on exactly this.)
+          if ! ls Transmute-linux-x86_64.tar.gz Transmute-windows-x86_64.zip \
+                  SHA256SUMS.linux SHA256SUMS.windows >/dev/null 2>&1; then
+            echo "::error::artifacts missing after download: $(ls -la | tr '\n' '~' | tr ':' '-')"
+            exit 1
+          fi
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>/tmp/gh1.err; then
             echo "::notice::no release for $TAG yet - creating it (prerelease)"
-            gh release create "$TAG" --verify-tag --prerelease \
-              --title "Transmute $TAG" --notes "Automated alpha release."
+            if ! gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+                --title "Transmute $TAG" --notes "Automated alpha release." 2>/tmp/gh2.err; then
+              echo "::error::release create failed: $(tr '\n' '~' </tmp/gh2.err | tr ':' '-' | tail -c 380)"
+              exit 1
+            fi
           fi
           cat SHA256SUMS.linux SHA256SUMS.windows > SHA256SUMS.txt
-          gh release upload "$TAG" \
-            Transmute-linux-x86_64.tar.gz \
-            Transmute-windows-x86_64.zip \
-            SHA256SUMS.txt --clobber
+          if ! gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+              Transmute-linux-x86_64.tar.gz \
+              Transmute-windows-x86_64.zip \
+              SHA256SUMS.txt --clobber 2>/tmp/gh3.err; then
+            echo "::error::release upload failed: $(tr '\n' '~' </tmp/gh3.err | tr ':' '-' | tail -c 380)"
+            exit 1
+          fi
           echo "::notice::release assets attached to $TAG"

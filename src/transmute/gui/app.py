@@ -14,18 +14,21 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QAbstractItemView,
+    QAbstractItemView, QInputDialog,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QFrame, QDialog, QProgressBar, QPushButton, QRadioButton, QSlider,
+    QFrame, QDialog, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton,
+    QSlider, QMessageBox,
     QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import theme
 from .controller import REMUX_CONTAINERS, ConverterController
+from ..probe.engines import STATUS_OK
+from ..probe import installer as _installer
 from ..watch import make_queue_callback
 
 
@@ -141,6 +144,8 @@ class MainWindow(QMainWindow):
     bench_note = Signal(int, int, str)   # done, total, what (worker -> GUI)
     bench_failed = Signal(str)           # "" ok; otherwise the machine's reason
     est_done = Signal(int, object)       # generation, measured estimate dict
+    engine_line = Signal(str)            # winget output line (worker -> GUI)
+    install_finished = Signal(int, str)  # installer exit code, engine name
 
     def __init__(self, controller: ConverterController | None = None) -> None:
         super().__init__()
@@ -174,6 +179,8 @@ class MainWindow(QMainWindow):
         self.bench_note.connect(self._on_bench_note)
         self.bench_failed.connect(self._on_bench_failed)
         self.est_done.connect(self._on_est_done)
+        self.engine_line.connect(self._on_engine_line)
+        self.install_finished.connect(self._on_install_finished)
         self._P = theme.apply(self)
         # queue view state (A + auto-hide): finished rows are folded away by
         # default, reachable behind "Show finished (N)"; rows THIS click just
@@ -447,6 +454,19 @@ class MainWindow(QMainWindow):
         self.lbl_caveats.setStyleSheet(theme.chip(self._P, "warn"))
         self.lbl_caveats.hide()
         mform.addRow(self.lbl_caveats)
+        # Option A, friendly end: Transmute ships no engines, but it will
+        # LAUNCH the machine's own package manager (winget) - with the exact
+        # command and license shown first - or open the tool's official
+        # download page. Nothing is ever copied into Transmute.
+        self.btn_engine = QPushButton("Get and install a missing engine…")
+        self.btn_engine.setToolTip(
+            "Runs your own Windows Package Manager (winget) or opens the "
+            "tool's official website. Transmute itself bundles no engines - "
+            "credits and licenses: THIRD-PARTY-NOTICES.md")
+        self.btn_engine.clicked.connect(self._engine_install_flow)
+        mform.addRow(self.btn_engine)
+        self.btn_engine.hide()
+        self._inst_dlg = None
         self._refresh_caveats()
         rv.addRow(more)
         qlrow = QHBoxLayout()
@@ -1662,6 +1682,130 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_caveats.clear()
             self.lbl_caveats.hide()
+        # the install helper follows the missing engines, not the caveats
+        # (caveats also cover GPU-trial refusals, which no install fixes)
+        try:
+            self.btn_engine.setVisible(bool(self._missing_engines()))
+        except Exception:  # noqa: BLE001 - widget mid-construction: harmless
+            pass
+
+    # ------------------------------------------------- get an engine (A flow)
+    def _missing_engines(self) -> list[str]:
+        """Engine names the machine does not have, useful order first."""
+        try:
+            eng = self.ctrl.report.engines or {}
+        except Exception:  # noqa: BLE001 - no report yet
+            return []
+        miss = {n for n, i in eng.items()
+                if (i or {}).get("status") != STATUS_OK}
+        order = ["ffmpeg", "gs", "qpdf", "pdftoppm", "pdftotext",
+                 "libreoffice", "pandoc"]
+        return [n for n in order if n in miss] + sorted(miss - set(order))
+
+    def _engine_install_flow(self) -> None:
+        miss = self._missing_engines()
+        if not miss:
+            QMessageBox.information(
+                self, "Engines",
+                "Every engine Transmute can use is already installed here.")
+            return
+        picks, seen = [], set()
+        for n in miss:  # dedupe packages: ffmpeg+ffprobe, both poppler tools
+            label = _installer.DISPLAY_NAMES.get(n, n)
+            if label not in seen:
+                seen.add(label)
+                picks.append((n, label))
+        label, ok = QInputDialog.getItem(
+            self, "Install a missing engine",
+            "Which tool should Transmute get for you?",
+            [p[1] for p in picks], 0, False)
+        if not ok:
+            return
+        engine = next(e for e, l in picks if l == label)
+        cmd = (_installer.install_command(engine)
+               if _installer.winget_available() else None)
+        if cmd:
+            consent = (
+                "Transmute will run this command on your PC:\n\n    "
+                + " ".join(cmd) + "\n\n"
+                + _installer.LICENSE_INFO.get(engine, "") + "\n\n"
+                "The tool installs to YOUR system, stays under its own "
+                "license, and Transmute re-checks automatically when it "
+                "finishes.\n\nStart the install?")
+            if QMessageBox.question(
+                    self, "Install " + label.split(" -")[0], consent,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) \
+                    != QMessageBox.StandardButton.Yes:
+                return
+            self._inst_dlg = QDialog(self)
+            self._inst_dlg.setWindowTitle("Installing " + label.split(" -")[0]
+                                          + " - please wait")
+            lay = QVBoxLayout(self._inst_dlg)
+            lay.addWidget(QLabel(
+                "winget may raise its own permission (UAC) window - allow "
+                "it to continue. Do not close Transmute."))
+            self._inst_out = QPlainTextEdit()
+            self._inst_out.setReadOnly(True)
+            self._inst_out.setFixedHeight(220)
+            lay.addWidget(self._inst_out)
+            self._inst_dlg.resize(560, 300)
+            self._inst_dlg.show()
+            threading.Thread(target=self._install_body, args=(engine,),
+                             daemon=True).start()
+        else:
+            # No silent installer exists (Ghostscript - AGPL, by design - or
+            # no winget here): the documented instructions are the fix.
+            QDesktopServices.openUrl(QUrl(
+                _installer.DOWNLOAD_PAGES.get(engine, "https://ffmpeg.org/download.html")))
+            QMessageBox.information(
+                self, "Official download page opened",
+                "This one has no package-manager install (by design it stays "
+                "fully upstream), so your browser is opening the official "
+                "download page. Install it normally - Transmute finds it in "
+                "the usual folders; then click 'Re-benchmark this PC' or "
+                "restart the app.\n\n" + self._engine_hint_text(engine))
+
+    def _install_body(self, engine: str) -> None:
+        # worker thread: no widgets, signals only (same doctrine as reprobe)
+        code = 1
+        try:
+            code = _installer.run_install(engine, self.engine_line.emit)
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            self.engine_line.emit(str(exc))
+        self.install_finished.emit(code, engine)
+
+    def _on_engine_line(self, line: str) -> None:
+        if self._inst_dlg is not None:
+            self._inst_out.appendPlainText(line)
+
+    def _on_install_finished(self, code: int, engine: str) -> None:
+        if self._inst_dlg is not None:
+            self._inst_dlg.close()
+            self._inst_dlg = None
+        if code == 0:
+            # fresh winget/MSI PATH entries are invisible to a running
+            # process - merge them from the registry, then re-benchmark:
+            # the FULL reload (targets, encoders, caveats, this button).
+            _installer.refresh_path_from_registry()
+            self.lbl_status.setText(
+                _installer.DISPLAY_NAMES.get(engine, engine)
+                + " installed - re-checking this PC…")
+            self._start_reprobe()
+        else:
+            QMessageBox.warning(
+                self, "Install did not finish",
+                "The installer exited with code " + str(code) + ".\n\n"
+                "The manual instructions instead:\n\n"
+                + self._engine_hint_text(engine)
+                + "\n\n(You can also click this button again once the tool "
+                "is installed - Transmute re-checks either way.)")
+
+    def _engine_hint_text(self, engine: str) -> str:
+        from ..probe.engines import _INSTALL_HINTS, _OS_KEY
+        return _INSTALL_HINTS.get(engine, {}).get(
+            _OS_KEY, "Install this tool from its official website; "
+            "Transmute finds tools on PATH and in the usual folders.")
 
     # --------------------------------------------------------- watch folders
     def _watch_add_dialog(self) -> None:

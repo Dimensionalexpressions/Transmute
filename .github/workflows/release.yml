@@ -222,6 +222,11 @@ jobs:
           - Linux: your package manager (`ffmpeg ghostscript qpdf poppler-utils pandoc libreoffice`)
           - Nix flake and Docker image: engines already baked in
 
+          Missing engines? In the app, click **"Get and install a missing engine…"** —
+          Transmute runs your machine's own package manager (winget) or opens the tool's
+          official download page, always after showing you the exact command and license,
+          then re-checks automatically. It never bundles an engine.
+
           Verify downloads against `SHA256SUMS.txt`. Alpha binaries are unsigned;
           SmartScreen's "unknown publisher" warning is expected.
           NOTES

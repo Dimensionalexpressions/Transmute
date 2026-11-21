@@ -23,9 +23,31 @@ it ships as-is, with no warranty, exactly as stated in `LICENSE`.
 
 Pick one. In **every** option the engines (FFmpeg, Ghostscript, qpdf,
 LibreOffice, pandoc, poppler) stay external system tools — the app probes
-what exists and honestly greys out the rest. On Windows, install engines
-first, e.g. `winget install Gyan.FFmpeg` (and LibreOffice, qpdf, ghostscript
-as needed); Transmute will find them on PATH.
+what exists and honestly greys out the rest.
+
+### Get the engines (one-time, on your machine)
+
+Transmute runs what you install; it copies nothing. On **Windows** (PowerShell):
+
+```powershell
+winget install Gyan.FFmpeg                        # video / audio / images
+winget install QPDF.QPDF                          # PDF repair & optimize
+winget install oschwartz10612.Poppler             # PDF -> images / text
+winget install JohnMacFarlane.Pandoc              # markdown / docx / epub
+winget install TheDocumentFoundation.LibreOffice  # office documents
+```
+
+Ghostscript has no winget package — install the official 64-bit `.msi` from
+[ghostscript.com](https://ghostscript.com/releases/gsdnld.html). Transmute
+auto-detects winget installs, `C:\Program Files` locations, choco and scoop —
+just start (or restart) the app after installing; each missing engine greys
+out only its own conversions.
+
+On **Linux**, your package manager has all of them (e.g. Debian/Ubuntu:
+`sudo apt install ffmpeg ghostscript qpdf poppler-utils pandoc libreoffice`;
+Arch: `pacman -S ffmpeg ghostscript qpdf poppler pandoc libreoffice-fresh`;
+Fedora: `sudo dnf install ffmpeg ghostscript qpdf poppler-utils pandoc
+libreoffice`). The Nix flake and Docker image bake the engines in — nothing to install there.
 
 | How | Command / download | Notes |
 |---|---|---|
@@ -149,10 +171,12 @@ Include this notice in a reasonably accessible location appropriate to your prod
 > Originally conceived and developed by Coty Julien. Published by Dimensional Expressions LLC.  
 > Original project: [Transmute](https://github.com/Dimensionalexpressions/transmute)
 
-Engines (ffmpeg, Ghostscript, qpdf, LibreOffice, poppler, pandoc) stay external and on your own
+Engines (FFmpeg, Ghostscript, qpdf, LibreOffice, poppler, pandoc) stay external and on your own
 system's packaging; this repository bundles **no** codec or engine binaries, and every third-party
-component keeps its own license. When redistributing the software, include
-`THIRD-PARTY-NOTICES.md` (or an equivalent notice) as well (FUAL-1.0 §6).
+component keeps its own license. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) names every
+engine and every shipped component (Python, PySide6, Qt) with its license, official links and our
+thanks. When redistributing the software, include that file (or an equivalent notice) as well
+(FUAL-1.0 §6).
 
 <!-- report-a-bug:start -->
 ## Report a bug

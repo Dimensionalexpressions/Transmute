@@ -34,41 +34,46 @@ _INSTALL_HINTS: dict[str, dict[str, str]] = {
         "linux": "Install FFmpeg with your distribution's package manager "
                  "(Arch: pacman -S ffmpeg · Fedora: sudo dnf install ffmpeg · "
                  "Debian/Ubuntu: sudo apt install ffmpeg).",
-        "windows": "Download FFmpeg from the official site https://www.ffmpeg.org/download.html "
-                   "(linked builds for Windows), extract it, and set the path in Settings → Engines, "
-                   "or add its bin folder to PATH.",
+        "windows": "Install with: winget install Gyan.FFmpeg (PowerShell) - or download from "
+                   "https://ffmpeg.org/download.html (official linked builds). Transmute finds "
+                   "winget installs, C:\\Program Files\\ffmpeg\\bin, choco and scoop automatically; "
+                   "restart the app after installing.",
     },
     "ffprobe": {
         "linux": "Ships with FFmpeg - install the ffmpeg package (same as above).",
-        "windows": "Ships with FFmpeg - see https://www.ffmpeg.org/download.html.",
+        "windows": "Ships with FFmpeg - winget install Gyan.FFmpeg (see https://ffmpeg.org/download.html).",
     },
     "qpdf": {
         "linux": "Install qpdf with your package manager (pacman -S qpdf / apt install qpdf).",
-        "windows": "Install from the official project page https://qpdf.org (Windows installer).",
+        "windows": "Install with: winget install QPDF.QPDF - or from https://github.com/qpdf/qpdf/releases.",
     },
     "gs": {
         "linux": "Install Ghostscript with your package manager "
                  "(pacman -S ghostscript / apt install ghostscript).",
-        "windows": "Install from the official project page https://ghostscript.com (Windows .msi).",
+        "windows": "Install the official 64-bit .msi from "
+                   "https://ghostscript.com/releases/gsdnld.html (there is no winget package). "
+                   "Transmute auto-detects C:\\Program Files\\gs.",
     },
     "pdftoppm": {
         "linux": "Install poppler-utils (pacman -S poppler / apt install poppler-utils).",
-        "windows": "Get a Windows build of Poppler (e.g. https://github.com/oschwartz10612/poppler-windows) "
-                   "and set the path in Settings → Engines.",
+        "windows": "Install with: winget install oschwartz10612.Poppler "
+                   "(https://github.com/oschwartz10612/poppler-windows).",
     },
     "pdftotext": {
         "linux": "Install poppler-utils (pacman -S poppler / apt install poppler-utils).",
-        "windows": "Get a Windows build of Poppler (e.g. https://github.com/oschwartz10612/poppler-windows) "
-                   "and set the path in Settings → Engines.",
+        "windows": "Install with: winget install oschwartz10612.Poppler "
+                   "(https://github.com/oschwartz10612/poppler-windows).",
     },
     "libreoffice": {
         "linux": "Install LibreOffice with your package manager (pacman -S libreoffice-fresh / "
                  "apt install libreoffice).",
-        "windows": "Install from the official site https://www.libreoffice.org/download/.",
+        "windows": "Install with: winget install TheDocumentFoundation.LibreOffice - or from "
+                   "https://www.libreoffice.org/download/.",
     },
     "pandoc": {
         "linux": "Install pandoc with your package manager (pacman -S pandoc / apt install pandoc).",
-        "windows": "Install from the official site https://pandoc.org/installing.html.",
+        "windows": "Install with: winget install JohnMacFarlane.Pandoc - or from "
+                   "https://pandoc.org/installing.html.",
     },
 }
 
@@ -143,7 +148,9 @@ class EngineInfo:
     @property
     def install_hint(self) -> str:
         return _INSTALL_HINTS.get(self.name, {}).get(_OS_KEY,
-               "Install the tool from its official website, or set a custom path in Settings → Engines.")
+               "Install the tool from its official website; Transmute auto-detects PATH and "
+               "conventional install folders. Licenses and links: THIRD-PARTY-NOTICES.md "
+               "in the project repository.")
 
 
 def _conventional_dirs() -> list[Path]:

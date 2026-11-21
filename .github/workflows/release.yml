@@ -206,11 +206,35 @@ jobs:
             echo "::error::artifacts missing after download: $(ls -la | tr '\n' '~' | tr ':' '-')"
             exit 1
           fi
+          cat > /tmp/relnotes.md <<'NOTES'
+          Alpha release. **Engines are NOT bundled** — Transmute drives FFmpeg,
+          Ghostscript, qpdf, Poppler, LibreOffice and pandoc installed on your own
+          machine (each under its own license; see `THIRD-PARTY-NOTICES.md` in this
+          repository for full credits, licenses and links — with thanks to every
+          upstream project).
+
+          Install the engines once:
+
+          - Windows (PowerShell): `winget install Gyan.FFmpeg`, `winget install QPDF.QPDF`,
+            `winget install oschwartz10612.Poppler`, `winget install JohnMacFarlane.Pandoc`,
+            `winget install TheDocumentFoundation.LibreOffice`; Ghostscript via its official
+            `.msi` from https://ghostscript.com/releases/gsdnld.html
+          - Linux: your package manager (`ffmpeg ghostscript qpdf poppler-utils pandoc libreoffice`)
+          - Nix flake and Docker image: engines already baked in
+
+          Verify downloads against `SHA256SUMS.txt`. Alpha binaries are unsigned;
+          SmartScreen's "unknown publisher" warning is expected.
+          NOTES
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>/tmp/gh1.err; then
             echo "::notice::no release for $TAG yet - creating it (prerelease)"
             if ! gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
-                --title "Transmute $TAG" --notes "Automated alpha release." 2>/tmp/gh2.err; then
+                --title "Transmute $TAG" --notes-file /tmp/relnotes.md 2>/tmp/gh2.err; then
               echo "::error::release create failed: $(tr '\n' '~' </tmp/gh2.err | tr ':' '-' | tail -c 380)"
+              exit 1
+            fi
+          else
+            if ! gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file /tmp/relnotes.md 2>/tmp/gh1b.err; then
+              echo "::error::release edit failed: $(tr '\n' '~' </tmp/gh1b.err | tr ':' '-' | tail -c 380)"
               exit 1
             fi
           fi

@@ -19,17 +19,26 @@ release notes may carry breaking changes between versions without warning.
 Releases are tagged and labelled accordingly. Use under the license terms —
 it ships as-is, with no warranty, exactly as stated in `LICENSE`.
 
-## Downloads
+## Install
 
-Source-only for now — Transmute needs the engines installed on your machine
-anyway (FFmpeg, Ghostscript, qpdf, LibreOffice, pandoc, poppler), so a zip
-buys you little. Pick one:
+Pick one. In **every** option the engines (FFmpeg, Ghostscript, qpdf,
+LibreOffice, pandoc, poppler) stay external system tools — the app probes
+what exists and honestly greys out the rest. On Windows, install engines
+first, e.g. `winget install Gyan.FFmpeg` (and LibreOffice, qpdf, ghostscript
+as needed); Transmute will find them on PATH.
 
-| How | Get it |
-|---|---|
-| Source archive | [Releases](https://github.com/Dimensionalexpressions/transmute/releases) → latest, then the Quickstart below |
-| Nix flake | `nix run github:Dimensionalexpressions/transmute` — engines are baked into PATH by the flake |
-| Git checkout | the Quickstart below |
+| How | Command / download | Notes |
+|---|---|---|
+| Windows binary | [Releases](https://github.com/Dimensionalexpressions/Transmute/releases) → `Transmute-windows-x86_64.zip` | unpack, run `Transmute.exe`; SHA256 in `SHA256SUMS.txt` |
+| Linux binary | same release → `Transmute-linux-x86_64.tar.gz` | built on Ubuntu 24.04 (glibc ≥ 2.39); `./Transmute/Transmute` |
+| Nix / NixOS | `nix run github:Dimensionalexpressions/Transmute` | one-shot try; **engines baked into PATH by the flake** — nothing else to install |
+| Nix install | `nix profile install github:Dimensionalexpressions/Transmute#transmute` | adds `transmute` + `transmute-serve` to PATH |
+| Docker (serve mode) | `docker run -d -p 8765:8765 -v ./data:/data ghcr.io/dimensionalexpressions/transmute-serve:latest` | conversion core behind a browser on your LAN; engines baked in; see `docker/README.md` |
+| Source | Quickstart below | full test suite included |
+
+The Docker image serves the **web front end** of the same conversion core
+(`transmute serve`), not the desktop GUI — a container has no desktop. Open
+the token link the container prints at startup from any device on your LAN.
 
 ## Publisher
 

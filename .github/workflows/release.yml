@@ -1,0 +1,158 @@
+name: Release build
+
+# Builds the SHIPPABLE artifacts from a tagged commit and publishes them to
+# the matching GitHub release + ghcr.io - all authenticated by the workflow's
+# own GITHUB_TOKEN, so no personal tokens are involved anywhere.
+#
+# Honesty contract (same doctrine as the tests):
+#   * binaries are built on the SAME runner OS family that our green test
+#     matrix validated (Linux job = ubuntu, Windows job = windows-latest);
+#   * every artifact is smoke-RUN before upload: the frozen GUI must start
+#     and keep its Qt event loop alive headless, or the job goes red and
+#     nothing is published from it;
+#   * engines stay EXTERNAL: nothing is faked into the bundle; the app
+#     probes PATH and reports honestly, exactly as documented.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag (with a published release) to rebuild"
+        default: "v0.2.0"
+
+permissions:
+  contents: write   # gh release upload
+  packages: write   # ghcr.io push
+
+jobs:
+  binary-linux:
+    runs-on: ubuntu-24.04          # glibc floor of the tarball: 2.39 (Ubuntu 24.04)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build-only tools (PyInstaller is NEVER a runtime dep)
+        run: |
+          python -m pip install -U pip
+          # Essentials only: src/ imports nothing beyond QtCore/QtGui/QtWidgets.
+          python -m pip install -e . PySide6-Essentials pyinstaller
+      - name: Freeze (onedir - relocatable, no onefile extraction games)
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed \
+            --name Transmute --collect-all transmute \
+            packaging/launch_gui.py
+      - name: Smoke - frozen GUI must start and stay alive headless
+        run: |
+          QT_QPA_PLATFORM=offscreen ./dist/Transmute/Transmute >/tmp/smoke.log 2>&1 &
+          P=$!
+          sleep 12
+          if kill -0 "$P" 2>/dev/null; then
+            echo "::notice::linux frozen GUI alive after 12s"; kill "$P"
+          else
+            echo "::error::frozen GUI exited early (code $(wait "$P"; echo $?))"
+            tail -20 /tmp/smoke.log
+            exit 1
+          fi
+      - name: Pack + checksum
+        run: |
+          tar -C dist -czf Transmute-linux-x86_64.tar.gz Transmute
+          sha256sum Transmute-linux-x86_64.tar.gz > SHA256SUMS.linux
+          cat SHA256SUMS.linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: |
+            Transmute-linux-x86_64.tar.gz
+            SHA256SUMS.linux
+
+  binary-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build-only tools
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e . PySide6-Essentials pyinstaller
+      - name: Freeze (onedir)
+        run: >
+          pyinstaller --noconfirm --clean --onedir --windowed
+          --name Transmute --collect-all transmute packaging/launch_gui.py
+      - name: Smoke - frozen GUI must start and stay alive headless
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process -FilePath "dist\Transmute\Transmute.exe" -PassThru
+          Start-Sleep 15
+          if ($p.HasExited) {
+            "::error::frozen exe exited early (code $($p.ExitCode))"
+            exit 1
+          }
+          "::notice::windows frozen GUI alive after 15s"
+          Stop-Process -Id $p.Id
+      - name: Pack + checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\Transmute -DestinationPath Transmute-windows-x86_64.zip
+          $h = (Get-FileHash -Algorithm SHA256 Transmute-windows-x86_64.zip).Hash.ToLower()
+          "$h  Transmute-windows-x86_64.zip" | Set-Content -Encoding ascii SHA256SUMS.windows
+          Get-Content SHA256SUMS.windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: |
+            Transmute-windows-x86_64.zip
+            SHA256SUMS.windows
+
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      # ghcr paths must be lowercase; the org login is fixed, hardcode rather
+      # than invent lowercase expressions that could silently break.
+      IMG: ghcr.io/dimensionalexpressions/transmute-serve
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to ghcr.io with the workflow token
+        run: echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build serve image (linux/amd64; documented, no false multi-arch)
+        run: docker build -f docker/Dockerfile -t "$IMG:$TAG" -t "$IMG:latest" .
+      - name: Smoke before publish
+        run: |
+          docker run -d --name s -e TRANSMUTE_TOKEN=*** -p 127.0.0.1:18765:8765 "$IMG:$TAG"
+          sleep 8
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18765/)
+          docker rm -f s >/dev/null
+          [ "$code" = "200" ] || { echo "::error::serve smoke got $code"; exit 1; }
+          echo "::notice::serve smoke 200 OK"
+      - name: Push
+        run: docker push "$IMG:$TAG" && docker push "$IMG:latest"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  upload:
+    needs: [binary-linux, binary-windows]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-binary"
+          merge-multiple: true
+      - name: Attach to the published GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat SHA256SUMS.linux SHA256SUMS.windows > SHA256SUMS.txt
+          gh release upload "$TAG" \
+            Transmute-linux-x86_64.tar.gz \
+            Transmute-windows-x86_64.zip \
+            SHA256SUMS.txt --clobber
+          echo "::notice::release assets attached to $TAG"

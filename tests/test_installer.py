@@ -111,3 +111,12 @@ def test_soffice_never_resolves_to_the_com_console_shim(tmp_path, monkeypatch):
     names = eng._names_for(spec)
     assert "soffice.exe" in names
     assert "soffice" not in names           # bare name = PATHEXT roulette
+
+
+def test_libreoffice_version_probe_is_always_headless():
+    # user laptop 2026-11: v0.2.5 "kept launching soffice.exe" - a plain
+    # `soffice --version` can open LibreOffice's window (and first-run
+    # wizard); the probe must never let that happen.
+    from transmute.probe.engines import KNOWN_ENGINES
+    assert KNOWN_ENGINES["libreoffice"].version_args[0] == "--headless"
+    assert "--version" in KNOWN_ENGINES["libreoffice"].version_args

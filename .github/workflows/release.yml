@@ -78,6 +78,16 @@ jobs:
             echo "::error::2404 smoke died: $MSG"
             exit 1
           fi
+      - name: Frozen smoke - engines+serve via --smoke on the runner
+        # same gate as Windows: the frozen Linux binary must detect engines,
+        # start serve, answer HTTP, stop cleanly - or the release stops here.
+        run: |
+          REQ=""
+          command -v soffice >/dev/null 2>&1 && REQ="libreoffice"
+          QT_QPA_PLATFORM=offscreen TRANSMUTE_SMOKE_ENGINES="$REQ" \
+            ./dist/Transmute/Transmute --smoke; RC=$?
+          cat dist/Transmute/transmute-smoke.log 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then echo "::error::frozen smoke failed (rc $RC)"; exit 1; fi
       - name: Pack + checksum
         run: |
           tar -C dist -czf Transmute-linux-x86_64.tar.gz Transmute
@@ -101,21 +111,41 @@ jobs:
         run: |
           python -m pip install -U pip
           python -m pip install -e . PySide6-Essentials pyinstaller
+      - name: Provide LibreOffice for the smoke (external engine; never bundled)
+        # winget exit 0x8A15002B (-1978335189) = already installed = success
+        shell: pwsh
+        run: |
+          winget install -e --id TheDocumentFoundation.LibreOffice --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) { exit $LASTEXITCODE }
       - name: Freeze (onedir)
         run: >
           pyinstaller --noconfirm --clean --onedir --windowed
           --name Transmute --collect-all transmute packaging/launch_gui.py
-      - name: Smoke - frozen GUI must start and stay alive headless
+      - name: Smoke - frozen build must probe, serve and stay alive before shipping
+        # 2026-11 proved "it starts" is not enough: v0.2.5 started fine yet
+        # its LibreOffice probe popped console windows demanding Enter, and
+        # serve stuck itself off. --smoke (transmute/selfcheck.py) runs the
+        # FROZEN build's own probe/serve/governor code paths; a nonzero exit
+        # here stops the release before any zip is packed.
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
+          $env:TRANSMUTE_SMOKE_ENGINES = "libreoffice"
+          $s = Start-Process -FilePath "dist\Transmute\Transmute.exe" -ArgumentList "--smoke" -Wait -PassThru
+          if (Test-Path dist\Transmute\transmute-smoke.log) {
+            Get-Content dist\Transmute\transmute-smoke.log
+          }
+          if ($s.ExitCode -ne 0) {
+            "::error::frozen smoke FAILED (exit $($s.ExitCode)) - broken in the exact build we would ship"
+            exit 1
+          }
           $p = Start-Process -FilePath "dist\Transmute\Transmute.exe" -PassThru
           Start-Sleep 15
           if ($p.HasExited) {
             "::error::frozen exe exited early (code $($p.ExitCode))"
             exit 1
           }
-          "::notice::windows frozen GUI alive after 15s"
+          "::notice::frozen smoke OK; windows GUI alive after 15s"
           Stop-Process -Id $p.Id
       - name: Pack + checksum
         shell: pwsh

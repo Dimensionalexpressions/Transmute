@@ -2090,6 +2090,12 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--smoke" in argv:
+        # release gate (CI VMs): exercise engines+serve+governor, no GUI;
+        # see transmute/selfcheck.py for why this exists
+        from ..selfcheck import run_smoke
+        return run_smoke()
     from PySide6.QtWidgets import QApplication
     app = QApplication(argv if argv is not None else sys.argv)
     win = MainWindow()

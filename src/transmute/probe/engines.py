@@ -119,13 +119,24 @@ KNOWN_ENGINES: dict[str, EngineSpec] = {
         optional=True),
     "libreoffice": EngineSpec(
         "libreoffice", ("libreoffice", "soffice", "soffice.bin", "soffice.exe"),
-        ("--version",), re.compile(r"LibreOffice ([0-9][0-9.]*)"), optional=True,
+        # --headless is NOT optional: without it a plain version check can
+        # open LibreOffice's real window - and on first use its wizard -
+        # which on Windows means Transmute appeared to "keep launching
+        # soffice.exe" (user's laptop, 2026-11). Headless: print and exit,
+        # verified locally against LibreOffice 26.8 (rc=0, "LibreOffice 26.8.0.3").
+        ("--headless", "--version"), re.compile(r"LibreOffice ([0-9][0-9.]*)"), optional=True,
         timeout_s=25.0,
         # P6 (found on the Windows bench): LibreOffice ships `soffice.COM`, a
         # console-launcher shim that HANGS headless. shutil.which("soffice")
         # resolves it first because PATHEXT tries .COM before .EXE - so on
-        # Windows never ask for the bare name; soffice.exe IS the binary.
-        extra_names=((), ("soffice.exe", "soffice.bin", "libreoffice"))),
+        # Windows never ask for the bare name.
+        # And soffice.exe is NOT the probe target either: on Windows 25.8 it
+        # answers `--version` by opening its OWN console window, printing the
+        # version there (our pipe stays empty), and sitting on "Press Enter
+        # to continue..." until clicked - once per probe attempt, so the app
+        # looked like it "kept launching soffice.exe" (user photo 2026-11).
+        # soffice.bin is the real console binary: answers into the pipe.
+        extra_names=((), ("soffice.bin", "soffice.exe", "libreoffice"))),
     "pandoc": EngineSpec(
         "pandoc", ("pandoc",), ("--version",), re.compile(r"pandoc(?:\.exe)? ([0-9][0-9.]*)"),
         optional=True),

@@ -132,6 +132,20 @@ jobs:
             & $exe.FullName -version | Select-Object -First 1 | ForEach-Object { "::notice::ffmpeg ready: $($_)" }
           } else { "::error::ffmpeg install FAILED - mp4-dependent tests will skip, not fail" }
 
+      - name: Provide LibreOffice (external engine; the probe must face a real one)
+        # The 2026-11 field bugs were LibreOffice-specific ON WINDOWS, and
+        # this VM never had LibreOffice - so the probe path they live in was
+        # never executed there. Install the real thing; detection and the
+        # self-check below then run against it instead of skipping.
+        # winget exit 0x8A15002B (-1978335189) = "already installed" = success.
+        shell: pwsh
+        run: |
+          winget install -e --id TheDocumentFoundation.LibreOffice --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            "::error::LibreOffice install FAILED (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+
       - name: Install the app (Python deps only; engines stay external)
         run: pip install -e ".[dev,gui,serve]"
 
@@ -201,6 +215,18 @@ jobs:
           python -c "import pathlib; d=pathlib.Path('pytest_out.txt').read_bytes() if pathlib.Path('pytest_out.txt').exists() else b''; k=d.find(b'Windows fatal exception'); k=k if k>=0 else d.find(b'Current thread'); k=k if k>=0 else max(0,len(d)-1300); print('::error::pytest tail: ' + repr(d[k:][:3000])[:3200])"
           python tools/ci_result_guard.py results.xml (Get-Content pytest_rc.txt -ErrorAction SilentlyContinue) pytest_out.txt
           echo "::notice::w3 guard-exit=$LASTEXITCODE"
+
+      - name: Serve + installed-LibreOffice probe must WORK on Windows
+        # Field bugs 2026-11 (user laptops): a version probe made LibreOffice
+        # open its own console window and WAIT FOR ENTER - detection stalled
+        # minutes per attempt and users saw "soffice.exe keeps launching" -
+        # and serve could not be switched on. Both are invisible to unit
+        # tests; this step executes the real subprocess and a real HTTP bind
+        # on the Windows VM, so those regressions fail HERE, not at the user.
+        shell: pwsh
+        run: python -m transmute.selfcheck
+        env:
+          TRANSMUTE_SMOKE_ENGINES: libreoffice
 
       - name: Governor load test - real Job Object cap must RUN and hold
         shell: pwsh

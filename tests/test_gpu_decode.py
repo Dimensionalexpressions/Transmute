@@ -111,21 +111,33 @@ def test_trial_believed_only_when_frames_leave_the_cpu(tmp_path, monkeypatch):
             assert c.index("-hwaccel") < c.index("-i")
 
 
+def _allowed_decode_apis(exclude: str = "") -> set[str]:
+    """Which device APIs THIS OS may trial - derived from production, never
+    hardcoded per file (Windows CI ran these very trials' Linux list and
+    failed green-locally-red-on-the-VM: 2026-11 windows-latest job)."""
+    return {api for api, node in cap._DECODE_APIS
+            if api != exclude and cap._decode_api_allowed(node)}
+
+
 def test_driver_decline_reported_never_claimed(tmp_path, monkeypatch):
-    # both APIs accepted the flag, neither produced GPU frames: honest NO
+    # every allowed API accepted the flag, none produced GPU frames: honest NO
     calls = _fake_ffmpeg(monkeypatch, tmp_path, "yuv420p")
     r = _probe_gpu_decode(Path("ffmpeg"))
     assert r["attempted"] is True and r["available"] is False and r["api"] == ""
     assert "decoded to CPU frames" in r["reason"]
-    # both device APIs get their own trial
+    # every device API this OS allows gets its own trial
     assert {c[c.index("-hwaccel") + 1] for c in calls if "-hwaccel" in c} \
-        == {"cuda", "vaapi"}
+        == _allowed_decode_apis()
 
 
 def test_nvdec_declines_vaapi_takes_the_job(tmp_path, monkeypatch):
-    _fake_ffmpeg(monkeypatch, tmp_path, {"vaapi": "nv12"})
+    # NVIDIA declines: another GPU API this OS allows (VA-API on Linux,
+    # D3D11VA on Windows) takes the decode job
+    winner = sorted(_allowed_decode_apis(exclude="cuda"))
+    assert winner, "this platform must have a non-NVIDIA decode rung"
+    _fake_ffmpeg(monkeypatch, tmp_path, {winner[0]: "nv12"})
     r = _probe_gpu_decode(Path("ffmpeg"))
-    assert r["available"] is True and r["api"] == "vaapi"
+    assert r["available"] is True and r["api"] == winner[0]
 
 
 # ------------------------------------------------------------------ schema

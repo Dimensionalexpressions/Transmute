@@ -87,7 +87,14 @@ class ServeLauncher:
                          auth_token=token)          # built (post_init)
             st.governor = gov
         cfg = uvicorn.Config(create_app(st), host=host, port=port,
-                             log_level="warning")
+                             log_level="warning",
+                             # The frozen GUI has NO console: sys.stdout is
+                             # None there, and uvicorn's default logging dict
+                             # dies on it ("Unable to configure formatter
+                             # 'default'") - the windowed exe could never
+                             # serve, whatever the console dev runs could.
+                             # WinBoat VM, 2026-11. GUI owns its own logging.
+                             log_config=None)
         srv = uvicorn.Server(cfg)
         err: list[str] = []
 

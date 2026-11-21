@@ -52,6 +52,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --onedir --windowed \
             --name Transmute --collect-all transmute \
+            --collect-all uvicorn --collect-all python_multipart \
             packaging/launch_gui.py
       - name: Smoke - frozen GUI on ubuntu:24.04 + the documented GL floor
         # PyInstaller deliberately does NOT bundle the OpenGL stack
@@ -81,7 +82,13 @@ jobs:
       - name: Frozen smoke - engines+serve via --smoke on the runner
         # same gate as Windows: the frozen Linux binary must detect engines,
         # start serve, answer HTTP, stop cleanly - or the release stops here.
+        # The VM plays the USER's machine here: engines are external, so we
+        # install the real ffmpeg (test-only tool - PyInstaller bundles what
+        # PYTHON imports, never what apt puts on PATH). v0.2.6 failed here
+        # honestly: the release runner had no ffmpeg, smoke said so, shipped
+        # - a red VM gate catching exactly the class of bug we chase by hand.
         run: |
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
           REQ=""
           command -v soffice >/dev/null 2>&1 && REQ="libreoffice"
           QT_QPA_PLATFORM=offscreen TRANSMUTE_SMOKE_ENGINES="$REQ" \
@@ -117,10 +124,17 @@ jobs:
         run: |
           winget install -e --id TheDocumentFoundation.LibreOffice --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
           if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) { exit $LASTEXITCODE }
+      - name: Provide FFmpeg (external engine; test VM plays the user machine)
+        shell: pwsh
+        run: |
+          winget install -e --id Gyan.FFmpeg --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) { exit $LASTEXITCODE }
       - name: Freeze (onedir)
         run: >
           pyinstaller --noconfirm --clean --onedir --windowed
-          --name Transmute --collect-all transmute packaging/launch_gui.py
+          --name Transmute --collect-all transmute
+          --collect-all uvicorn --collect-all python_multipart
+          packaging/launch_gui.py
       - name: Smoke - frozen build must probe, serve and stay alive before shipping
         # 2026-11 proved "it starts" is not enough: v0.2.5 started fine yet
         # its LibreOffice probe popped console windows demanding Enter, and

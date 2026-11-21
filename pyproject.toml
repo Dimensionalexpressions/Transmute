@@ -1,6 +1,6 @@
 [project]
 name = "transmute"
-version = "0.2.6"
+version = "0.2.6.1"
 description = "Transmute - open-source media & document converter that adapts to the machine it runs on (runtime capability probing, verify-before-replace, resource governor)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,15 @@ dependencies = [
     "psutil>=5.9",
     "platformdirs>=4",
     "watchdog>=6",  # F24 watch folders: inotify on Linux, RDCW on Windows (P6)
+    # Serve is a built-in button of the shipped GUI (2026-11 field bug: v0.2.5
+    # frozen builds carried the button but NOT these deps - clicking it died
+    # with "No module named 'uvicorn'" and the dialog snapped back to off).
+    # They were already imported unconditionally by src/transmute/serve;
+    # declaring them here is what puts them INSIDE the bundle.
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

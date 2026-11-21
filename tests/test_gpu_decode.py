@@ -218,3 +218,36 @@ def test_hwaccel_route_is_the_windows_decode_evidence():
     assert cap._decoded_pix_fmt(win_gpu) == cap._decoded_pix_fmt(cpu)
     assert cap._hwaccel_route(win_gpu) == "d3d11"
     assert cap._hwaccel_route(cpu) == ""
+
+
+def test_every_vendor_has_a_decode_rung_on_each_os(monkeypatch):
+    """The support promise: NVIDIA (NVDEC), AMD and Intel (D3D11VA/DXVA2
+    on Windows, VA-API on Linux) all get an executed decode trial on both
+    OSes - and CUDA is never assumed, it must win its trial to be used."""
+    import sys as _sys
+    from transmute.probe import capability as cap
+    by_node = {a: node for a, node in cap._DECODE_APIS}
+    assert by_node.get("cuda") == "nvidia"
+    monkeypatch.setattr(_sys, "platform", "win32")
+    win_allowed = {a for a, n in cap._DECODE_APIS if cap._decode_api_allowed(n)}
+    assert {"cuda", "d3d11va", "dxva2"} <= win_allowed   # NV + AMD + Intel
+    assert "vaapi" not in win_allowed
+    monkeypatch.setattr(_sys, "platform", "linux")
+    monkeypatch.setattr(cap, "_has_dri_render_node", lambda: True)
+    monkeypatch.setattr(cap, "_has_nvidia_nodes", lambda: True)
+    nix_allowed = {a for a, n in cap._DECODE_APIS if cap._decode_api_allowed(n)}
+    assert {"cuda", "vaapi"} <= nix_allowed              # NV + AMD/Intel
+    assert "d3d11va" not in nix_allowed
+
+
+def test_every_vendor_encodes_on_windows_too():
+    # Windows must not skip hardware encoder trials (device gate is
+    # POSIX-only) and every vendor's encoders must classify as hardware.
+    from transmute.probe import capability as cap
+    for enc in ("h264_nvenc", "hevc_nvenc", "h264_qsv", "av1_qsv",
+                "h264_amf", "hevc_amf", "h264_vaapi", "hevc_vaapi"):
+        c = cap._classify(enc, None)
+        assert c["hw"] and c["backend"] in cap._GPU_BACKENDS, enc
+    src = (Path(__file__).resolve().parents[1] / "src" / "transmute"
+           / "probe" / "capability.py").read_text(encoding="utf-8")
+    assert "sys.platform != \"win32\" and not hw_possible" in src

@@ -139,9 +139,27 @@ The governor keeps Transmute at ~80% CPU by suspending its *own* child
 process groups (SIGSTOP/SIGCONT sawtooth), throttles its own file IO, and
 runs at most a few GPU encode sessions at once. It never touches other
 programs. In the GUI this is the **"Throttle while converting"** checkbox
-(default on, remembered per machine): unchecked, engines run flat out.
+(unchecked by default since v0.2.5, remembered per machine): unchecked,
+engines run flat out.
 The server always throttles unless the operator sets `TRANSMUTE_GOVERNOR=0`
 in its environment — an uploaded file should never own somebody's machine.
+
+## GPU support
+
+All three vendors are supported through your own FFmpeg. Nothing is
+assumed: every row below gets an executed trial at benchmark time and is
+only claimed when the trial really did the work on the GPU — otherwise
+Transmute says so and quietly keeps using the CPU.
+
+| Vendor | Encode | Decode |
+| --- | --- | --- |
+| NVIDIA | `h264/hevc/av1_nvenc` (CUDA) | `-hwaccel cuda` (NVDEC) |
+| AMD | `h264/hevc/av1_amf`, `*_vaapi` (Linux) | D3D11VA / DXVA2 (Windows), VA-API (Linux) |
+| Intel | `h264/hevc/av1_qsv`, `*_vaapi` (Linux) | D3D11VA / DXVA2 (Windows), VA-API (Linux) |
+
+On Windows this works out of the box with the FFmpeg the in-app button
+installs (Gyan's full build ships NVENC, AMF, QSV, D3D11VA and DXVA2).
+Older drivers or GPUs without a given feature simply lose their trial.
 
 ## Where things live
 

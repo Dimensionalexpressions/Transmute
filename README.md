@@ -40,6 +40,12 @@ The Docker image serves the **web front end** of the same conversion core
 (`transmute serve`), not the desktop GUI — a container has no desktop. Open
 the token link the container prints at startup from any device on your LAN.
 
+The alpha binaries are **unsigned** (no Authenticode yet — an alpha can't
+promise the signing costs). Windows SmartScreen will warn "unknown
+publisher": it's the same build the green CI smoke-ran; `SHA256SUMS.txt`
+next to each download proves you got the bytes CI produced. Verify with
+`sha256sum -c SHA256SUMS.txt` (Linux) or `Get-FileHash` (Windows).
+
 ## Publisher
 
 **Dimensional Expressions Software**  

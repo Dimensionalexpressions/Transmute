@@ -111,12 +111,17 @@ def nvidia_gpu_names() -> list[str]:
     """Exact per-GPU names when the NVIDIA driver's tool is present."""
     import shutil
     import subprocess
+    import sys
     if not shutil.which("nvidia-smi"):
         return []
     try:
         p = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=6)
+            capture_output=True, text=True, timeout=6,
+            # Windows: nvidia-smi is a console tool - without this every
+            # probe flashed a black window behind the GUI (end-user scary).
+            **({"creationflags": subprocess.CREATE_NO_WINDOW}
+               if sys.platform == "win32" else {}))
     except (OSError, subprocess.SubprocessError):
         return []
     if p.returncode != 0:

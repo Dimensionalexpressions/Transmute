@@ -64,3 +64,20 @@ def test_refresh_path_is_noop_off_windows(monkeypatch):
     before = os.environ.get("PATH", "")
     assert ins.refresh_path_from_registry(read_paths=lambda: ("x", "y")) == []
     assert os.environ.get("PATH", "") == before
+
+
+def test_already_installed_is_success_not_failure():
+    # live-fire from the Windows test box 2026-11: winget refused to
+    # "reinstall" QPDF.QPDF (exact version present) and exited with this
+    # error - microsoft/winget-cli#4262. Both display forms must count.
+    assert ins.install_succeeded(-1978335189)
+    assert ins.install_succeeded(2316632107)
+    assert ins.install_code_is_already_installed(2316632107)
+    # tool found on disk after the run: installed one way or another
+    assert ins.install_succeeded(1, engine_present=True)
+    # winget's own words also settle it
+    assert ins.install_succeeded(1, False,
+                                 "Found an existing package already installed.")
+    # a genuinely failed install stays a failure
+    assert not ins.install_succeeded(5, False, "package not found")
+    assert not ins.install_code_is_already_installed(5)

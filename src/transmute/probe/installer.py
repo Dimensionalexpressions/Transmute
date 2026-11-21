@@ -115,6 +115,29 @@ def run_install(engine: str, on_line) -> int:
     return proc.wait()
 
 
+#: winget deliberately exits with this error when the EXACT version is
+#: already installed (microsoft/winget-cli#4262; signed display form
+#: -1978335189). It means the user has the tool - a success for us.
+WINGET_ALREADY_INSTALLED = 0x8A15002B
+
+
+def install_code_is_already_installed(exit_code: int) -> bool:
+    return (exit_code & 0xFFFFFFFF) == WINGET_ALREADY_INSTALLED
+
+
+def install_succeeded(exit_code: int, engine_present: bool = False,
+                      output_tail: str = "") -> bool:
+    """Judge an install run: winget's exit code alone is NOT the answer -
+    'already installed' errors and mid-run success (tool now found, PATH
+    refreshed) must count as installed, everything else as not."""
+    if exit_code == 0 or engine_present:
+        return True
+    if install_code_is_already_installed(exit_code):
+        return True
+    t = output_tail.lower()
+    return "already installed" in t or "already up to date" in t
+
+
 def refresh_path_from_registry(read_paths=None) -> "list[str]":
     """Windows: PATH entries added AFTER the app started (a fresh winget or
     MSI install) are invisible to this process. Merge machine+user PATH from

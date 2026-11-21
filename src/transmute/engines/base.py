@@ -136,7 +136,12 @@ def run_command(argv: Sequence[str | os.PathLike], *, timeout_s: float,
             # 44814376186 - pytest and its spawner were terminated mid-run,
             # no faulthandler output, only pwsh survived). NEW_PROCESS_GROUP
             # makes CTRL_BREAK address the child's tree alone.
-            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags=((subprocess.CREATE_NEW_PROCESS_GROUP
+                            # ...and NO_WINDOW: every conversion and every
+                            # benchmark trial ran with a console window that
+                            # flashed up and vanished - end-user scary.
+                            # This one flag hides the console of ALL of them.
+                            | subprocess.CREATE_NO_WINDOW)
                            if sys.platform == "win32" else 0),
             preexec_fn=_nice_preexec if (not sys.platform == "win32") else None,
         )
@@ -226,7 +231,8 @@ def _win_taskkill_tree(pid: int) -> None:
     try:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=10)
+                       stderr=subprocess.DEVNULL, timeout=10,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         pass
 

@@ -467,6 +467,7 @@ class MainWindow(QMainWindow):
         mform.addRow(self.btn_engine)
         self.btn_engine.hide()
         self._inst_dlg = None
+        self._inst_tail: list[str] = []
         self._refresh_caveats()
         rv.addRow(more)
         qlrow = QHBoxLayout()
@@ -1738,6 +1739,7 @@ class MainWindow(QMainWindow):
                     QMessageBox.StandardButton.No) \
                     != QMessageBox.StandardButton.Yes:
                 return
+            self._inst_tail = []
             self._inst_dlg = QDialog(self)
             self._inst_dlg.setWindowTitle("Installing " + label.split(" -")[0]
                                           + " - please wait")
@@ -1776,6 +1778,7 @@ class MainWindow(QMainWindow):
         self.install_finished.emit(code, engine)
 
     def _on_engine_line(self, line: str) -> None:
+        self._inst_tail.append(line)
         if self._inst_dlg is not None:
             self._inst_out.appendPlainText(line)
 
@@ -1783,20 +1786,37 @@ class MainWindow(QMainWindow):
         if self._inst_dlg is not None:
             self._inst_dlg.close()
             self._inst_dlg = None
-        if code == 0:
-            # fresh winget/MSI PATH entries are invisible to a running
-            # process - merge them from the registry, then re-benchmark:
-            # the FULL reload (targets, encoders, caveats, this button).
-            _installer.refresh_path_from_registry()
+        tail = "\n".join(self._inst_tail[-25:])
+        # A fresh winget/MSI PATH entry is invisible to a running process -
+        # merge it from the registry, THEN look for the tool itself. winget
+        # exits with a hard ERROR when the exact version is already
+        # installed (winget-cli#4262) - the tool being present now is the
+        # real proof, and that error code alone, so the tool being found
+        # decides, never the exit code by itself.
+        _installer.refresh_path_from_registry()
+        present = False
+        try:
+            from ..probe.engines import EngineManager
+            em = EngineManager()
+            present = bool(em.path(engine)) or (
+                em.path("ffmpeg") is not None and engine == "ffprobe") or (
+                em.path("pdftoppm") is not None and engine == "pdftotext")
+        except Exception:  # noqa: BLE001 - detection is best-effort here
+            pass
+        if _installer.install_succeeded(code, present, tail):
+            # the FULL reload: targets, encoders, caveats, this button
             self.lbl_status.setText(
                 _installer.DISPLAY_NAMES.get(engine, engine)
-                + " installed - re-checking this PC…")
+                + (" installed - re-checking this PC…" if code == 0
+                   else " is already installed on this PC - re-checking…"))
             self._start_reprobe()
         else:
             QMessageBox.warning(
                 self, "Install did not finish",
                 "The installer exited with code " + str(code) + ".\n\n"
-                "The manual instructions instead:\n\n"
+                "What the installer said (last lines):\n"
+                + (tail[-700:] + "\n\n" if tail.strip() else "")
+                + "The manual instructions instead:\n\n"
                 + self._engine_hint_text(engine)
                 + "\n\n(You can also click this button again once the tool "
                 "is installed - Transmute re-checks either way.)")

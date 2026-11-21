@@ -49,14 +49,16 @@ jobs:
             packaging/launch_gui.py
       - name: Smoke - frozen GUI must start and stay alive headless
         run: |
+          ldd ./dist/Transmute/Transmute 2>/dev/null | grep 'not found' \
+            | sed 's/^/::warning::missing-lib /' || echo "all dynamic deps resolve"
           QT_QPA_PLATFORM=offscreen ./dist/Transmute/Transmute >/tmp/smoke.log 2>&1 &
           P=$!
           sleep 12
           if kill -0 "$P" 2>/dev/null; then
             echo "::notice::linux frozen GUI alive after 12s"; kill "$P"
           else
-            echo "::error::frozen GUI exited early (code $(wait "$P"; echo $?))"
-            tail -20 /tmp/smoke.log
+            RC=1; wait "$P" 2>/dev/null || RC=$?
+            echo "::error::frozen GUI exited early rc=$RC TAIL $(tail -c 450 /tmp/smoke.log | tr '\n' '~' | tr ':' '-')"
             exit 1
           fi
       - name: Pack + checksum
@@ -122,21 +124,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Login to ghcr.io with the workflow token
-        run: echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        run: |
+          if ! echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/tmp/dl.log 2>&1; then
+            echo "::error::ghcr login failed: $(tr '\n' '~' </tmp/dl.log | cut -c1-300 | tr ':' '-')"
+            exit 1
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build serve image (linux/amd64; documented, no false multi-arch)
-        run: docker build -f docker/Dockerfile -t "$IMG:$TAG" -t "$IMG:latest" .
+        run: |
+          if ! docker build -f docker/Dockerfile -t "$IMG:$TAG" -t "$IMG:latest" . >/tmp/db.log 2>&1; then
+            echo "::error::docker build failed: $(tail -c 450 /tmp/db.log | tr '\n' '~' | tr ':' '-')"
+            exit 1
+          fi
       - name: Smoke before publish
         run: |
-          docker run -d --name s -e TRANSMUTE_TOKEN=*** -p 127.0.0.1:18765:8765 "$IMG:$TAG"
+          if ! docker run -d --name s -e TRANSMUTE_TOKEN=*** -p 127.0.0.1:18765:8765 "$IMG:$TAG" >/tmp/dr.log 2>&1; then
+            echo "::error::docker run failed: $(tr '\n' '~' </tmp/dr.log | cut -c1-450 | tr ':' '-')"
+            exit 1
+          fi
           sleep 8
-          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18765/)
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18765/ || echo curlfail)
+          if [ "$code" != "200" ]; then
+            echo "::error::serve smoke got $code logs $(docker logs s 2>&1 | tail -c 450 | tr '\n' '~' | tr ':' '-')"
+            docker rm -f s >/dev/null
+            exit 1
+          fi
           docker rm -f s >/dev/null
-          [ "$code" = "200" ] || { echo "::error::serve smoke got $code"; exit 1; }
           echo "::notice::serve smoke 200 OK"
       - name: Push
-        run: docker push "$IMG:$TAG" && docker push "$IMG:latest"
+        run: |
+          if ! docker push "$IMG:$TAG" >/tmp/dp.log 2>&1; then
+            echo "::error::push $TAG failed: $(tail -c 400 /tmp/dp.log | tr '\n' '~' | tr ':' '-')"
+            exit 1
+          fi
+          if ! docker push "$IMG:latest" >>/tmp/dp.log 2>&1; then
+            echo "::error::push latest failed: $(tail -c 400 /tmp/dp.log | tr '\n' '~' | tr ':' '-')"
+            exit 1
+          fi
+          echo "::notice::image published $IMG:$TAG (+latest)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

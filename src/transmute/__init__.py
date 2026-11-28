@@ -9,7 +9,7 @@ P1 scope: headless core (probe / engines / runner / governor). The GUI and the
 web portal are thin frontends over this same core (F18, F24).
 """
 
-__version__ = "0.2.6.2"
+__version__ = "0.2.6.3"
 
 APP_NAME = "Transmute"
 APP_ID = "transmute"

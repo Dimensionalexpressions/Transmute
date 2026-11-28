@@ -8,6 +8,7 @@ These lock the exact bugs we hit building P1:
 from __future__ import annotations
 
 import time
+from pathlib import Path as _P
 
 import pytest
 
@@ -270,3 +271,71 @@ def test_capability_cache_concurrent_save_no_race(tmp_path):
     assert not errs, f"concurrent cache save raised: {errs!r}"
     assert (tmp_path / "k.json").is_file()
     assert not list(tmp_path.glob("*.tmp")), "temp file leaked"
+
+
+# -- audio encoder trials: REAL round-trip, never a null sink -----------------
+# Live-fire Windows bug (VM hunt, 2026-11): MediaFoundation mp3_mf 'encodes'
+# into -f null with exit 0 and then truncates real files to 0.60s of a 2.00s
+# source, STILL exit 0. The trial must write an actual file and ask ffprobe
+# how long it is, or the picker serves that liar to every conversion.
+
+def _mp3_cap() -> EncoderCapability:
+    return EncoderCapability(name="mp3_mf", codec="mp3", backend="cpu",
+                             hw=False, verified=False, fps=None)
+
+
+def _fake_run(monkeypatch, out_duration: float | None, empty: bool = False):
+    """run_command double: ffmpeg trial writes a (fake) file, ffprobe reports it."""
+    from pathlib import Path as _P
+    from transmute.engines.base import CommandResult
+    from transmute.probe import capability as C
+
+    def fake(cmd, *a, **k):
+        cmd = [str(x) for x in cmd]
+        if "ffprobe" in cmd[0]:
+            import json as _j
+            out = _j.dumps({"format": {}} if out_duration is None
+                           else {"format": {"duration": f"{out_duration}"}})
+            return CommandResult(cmd, 0, out, "", None, 0.0)
+        # ffmpeg encode: create the output file (last argument), unless sink
+        if cmd[-1] != "-":
+            _P(cmd[-1]).write_bytes(b"" if empty else b"\x00" * 4096)
+        return CommandResult(cmd, 0, "", "", None, 0.1)
+
+    monkeypatch.setattr(C, "run_command", fake)
+
+
+def test_audio_trial_rejects_encoder_that_truncates(tmp_path, monkeypatch):
+    from transmute.probe.capability import _run_trial_audio
+    _fake_run(monkeypatch, 0.60)  # the exact mp3_mf failure mode
+    ok, fps, reason = _run_trial_audio(_P("ffmpeg"), _mp3_cap(), _P("ffprobe"))
+    assert not ok and "truncated" in reason
+
+
+def test_audio_trial_rejects_undecodable_output(monkeypatch):
+    from transmute.probe.capability import _run_trial_audio
+    _fake_run(monkeypatch, None)
+    ok, fps, reason = _run_trial_audio(_P("ffmpeg"), _mp3_cap(), _P("ffprobe"))
+    assert not ok and "not decodable" in reason
+
+
+def test_audio_trial_rejects_empty_output(monkeypatch):
+    from transmute.probe.capability import _run_trial_audio
+    _fake_run(monkeypatch, 2.0, empty=True)
+    ok, fps, reason = _run_trial_audio(_P("ffmpeg"), _mp3_cap(), _P("ffprobe"))
+    assert not ok and "empty" in reason
+
+
+def test_audio_trial_accepts_honest_encoder(monkeypatch):
+    from transmute.probe.capability import _run_trial_audio
+    _fake_run(monkeypatch, 2.0)
+    ok, fps, reason = _run_trial_audio(_P("ffmpeg"), _mp3_cap(), _P("ffprobe"))
+    assert ok and not reason and fps
+
+
+def test_audio_trial_falls_back_to_null_sink_without_ffprobe(monkeypatch):
+    # no ffprobe available: never crash, degrade to the old sink behaviour
+    from transmute.probe.capability import _run_trial_audio
+    _fake_run(monkeypatch, 0.10)  # would truncate if the file path ran
+    ok, fps, reason = _run_trial_audio(_P("ffmpeg"), _mp3_cap(), None)
+    assert ok  # sink trial: exit 0 is all it can see (documented fallback)

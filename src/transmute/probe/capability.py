@@ -38,7 +38,11 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 10  # 9 -> 10: gpu_decode field added (GPU decode ladder rung);
+SCHEMA_VERSION = 11  # 10 -> 11: audio encoder trials became REAL file
+# round-trips (encode -> ffprobe duration). Old caches can carry encoders
+# that pass a -f null sink and then silently truncate real files - measured
+# with MediaFoundation mp3_mf on Windows (2.00s in, 0.60s out, exit 0).
+# 9 -> 10: gpu_decode field added (GPU decode ladder rung);
 # old caches lack it and must re-probe, not fake "no decode".
 # 8 -> 9: benchmark sample raised to 1280x720 (numbers must
 # reflect THIS machine under realistic load, not a tiny clip that flatters CPUs);
@@ -342,12 +346,73 @@ def _trial_cmds(ffmpeg: Path, cap: EncoderCapability) -> list[list[Any]]:
 
 
 def _trial_cmd_audio(ffmpeg: Path, cap: EncoderCapability) -> list[Any]:
+    base: list[Any] = _trial_cmd_audio_sink(ffmpeg, cap, ["-f", "null", "-"])
+    return base
+
+
+def _trial_cmd_audio_sink(ffmpeg: Path, cap: EncoderCapability,
+                          sink: list[Any]) -> list[Any]:
     base: list[Any] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-                       "-f", "lavfi", "-i", "sine=frequency=440:duration=1"]
+                       "-f", "lavfi", "-i", "sine=frequency=440:duration=2"]
     if cap.name in SW_ENCODER_INFO:
         base += SW_ENCODER_INFO[cap.name].get("trial", [])
-    base += ["-c:a", cap.name, "-f", "null", "-"]
+    base += ["-c:a", cap.name] + sink
     return base
+
+
+# Real muxers for the audio round-trip trial, by codec. Unknown codec or no
+# ffprobe: fall back to the -f null sink (old behaviour).
+_AUDIO_TRIAL_FMT: dict[str, str] = {"mp3": "mp3", "aac": "adts", "opus": "ogg",
+                                    "vorbis": "ogg", "flac": "flac",
+                                    "alac": "mov", "pcm_s16le": "wav"}
+
+
+def _probe_duration_s(ffprobe: Path, path: Path) -> float | None:
+    res = run_command([ffprobe, "-v", "error", "-show_format", "-of", "json",
+                       str(path)], timeout_s=30)
+    if not res.ok:
+        return None
+    try:
+        return float(json.loads(res.stdout or "{}")["format"]["duration"])
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _run_trial_audio(ffmpeg: Path, cap: EncoderCapability,
+                     ffprobe: Path | None) -> tuple[bool, float | None, str]:
+    """Audio encoders are verified by a REAL round-trip, not a null sink.
+
+    Measured on the WinBoat VM (Windows hunt, 2026-11): MediaFoundation's
+    mp3_mf happily 'encodes' into -f null with exit 0 and measures fast -
+    then truncates real files to a fraction of the source while STILL
+    exiting 0. Only writing an actual file and asking ffprobe how long it
+    came out catches that class of liar, and audio is exactly where silent
+    truncation destroys the user's trust.
+    """
+    fmt = _AUDIO_TRIAL_FMT.get(cap.codec)
+    if ffprobe is None or fmt is None:
+        return _run_trial(_trial_cmd_audio(ffmpeg, cap))
+    with tempfile.TemporaryDirectory(prefix="transmute-trial-") as td:
+        out = Path(td) / f"trial.{fmt}"
+        ok, fps, reason = _run_trial(
+            _trial_cmd_audio_sink(ffmpeg, cap, ["-f", fmt, str(out)]))
+        if not ok:
+            return ok, fps, reason
+        if fps is None:   # timed out: doctrine says 'ran, unmeasured'
+            return ok, fps, reason
+        try:
+            size = out.stat().st_size
+        except OSError:
+            size = 0
+        if size == 0:
+            return False, None, "trial wrote an empty file"
+        got = _probe_duration_s(ffprobe, out)
+        if got is None:
+            return False, None, "trial output is not decodable"
+        if got < 1.6:     # encoded >=80% of the 2-second clip
+            return False, None, (f"trial output truncated "
+                                 f"({got:.2f}s of 2.00s written)")
+        return True, fps, ""
 
 
 def _run_trial(cmd: list[Any]) -> tuple[bool, float | None, str]:
@@ -699,7 +764,7 @@ class CapabilityProber:
                     continue
                 # video vs audio trial
                 if cap.codec in AUDIO_CODECS:
-                    ok, fps, reason = _run_trial(_trial_cmd_audio(ffmpeg, cap))
+                    ok, fps, reason = _run_trial_audio(ffmpeg, cap, ffprobe)
                 elif cap.backend == "cpu" and cap.codec in ("png", "webp"):
                     ok, fps, reason = (False, None, "")
                     cap.skipped = "image encoding handled via Pillow path"

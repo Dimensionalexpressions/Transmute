@@ -1288,6 +1288,12 @@ class MainWindow(QMainWindow):
         cat = self.cat_box.currentText()
         is_v = cat == "video"
         remux = is_v and self.chk_remux.isChecked()
+        # Animated pictures (GIF/WebP) have ONE fixed pipeline each: no
+        # quality ladder, no size target, no audio, no encoder choice.
+        # Showing those controls would invite settings the engine then
+        # (honestly) ignores or refuses - so they are disabled, visibly.
+        _tbase = (self._current_target() or "").split("(")[0].strip().lower()
+        anim = is_v and _tbase in ("gif", "webp")
         self.quality.setEnabled(cat == "image")
         self.deep_pdf.setEnabled(cat == "pdf")
         self.chk_remux.setEnabled(is_v)
@@ -1297,17 +1303,30 @@ class MainWindow(QMainWindow):
         self.chk_tonemap.setToolTip("" if tonemap_ok else
                                     "this ffmpeg lacks the zscale+tonemap "
                                     "chain (probed)")
-        self.chk_audio_replace.setEnabled(is_v and not remux)
+        self.chk_audio_replace.setEnabled(is_v and not remux and not anim)
+        self.chk_audio_replace.setToolTip(
+            "GIF/WebP carry no sound - audio is always removed there"
+            if anim else "")
         self.audio_kbps.setEnabled(is_v and not remux
                                    and self.chk_audio_replace.isChecked())
-        rate = is_v and not remux
+        rate = is_v and not remux and not anim
         self.rad_crf.setEnabled(rate)
         self.rad_size.setEnabled(rate)
         self._sync_preset_enabled()
+        if anim:
+            self.preset_box.setEnabled(False)
         self._sync_quality_scale()
         self.crf_box.setEnabled(rate and self.rad_crf.isChecked())
         self.qslider.setEnabled(rate and self.rad_crf.isChecked())
         self.size_box.setEnabled(rate and self.rad_size.isChecked())
+        if anim:
+            self.enc_box.setEnabled(False)
+            self.enc_box.setToolTip(
+                "animated GIF/WebP use one fixed pipeline - there is no "
+                "encoder to choose")
+        elif is_v:
+            self.enc_box.setEnabled(True)
+            self.enc_box.setToolTip("")
         if remux:
             # codec/encoder are meaningless for a stream copy: disabled but
             # visible; the container comes from the picker above (F2)

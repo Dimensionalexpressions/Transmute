@@ -1,6 +1,6 @@
 [project]
 name = "transmute"
-version = "0.2.6.1"
+version = "0.2.6.2"
 description = "Transmute - open-source media & document converter that adapts to the machine it runs on (runtime capability probing, verify-before-replace, resource governor)."
 readme = "README.md"
 requires-python = ">=3.11"

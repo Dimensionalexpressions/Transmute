@@ -568,3 +568,35 @@ def test_launcher_operator_password_instead_of_a_generated_one(tmp_path):
             assert r.status == 200
     finally:
         ln.stop()
+
+
+def test_serve_local_cli_flag_is_a_real_server():
+    # "Transmute serve-local" is the same ServeLauncher the GUI dialog
+    # uses, reachable from the installed binary. Prove the CLI path binds
+    # and answers, without assuming any engine is installed.
+    import subprocess, sys
+    from urllib.parse import urlparse
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "transmute.gui.app", "serve-local",
+         "--serve-port", "0"],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        line = ""
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if line.startswith("serving on "):
+                break
+            if not line:
+                break
+        assert line.startswith("serving on "), "serve-local never reported a URL"
+        port = urlparse(line.split("serving on ")[1].strip().rstrip("/").split("?")[0]).port
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz",
+                                    timeout=10) as r:
+            assert r.status == 200
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()

@@ -2096,6 +2096,34 @@ def main(argv: list[str] | None = None) -> int:
         # see transmute/selfcheck.py for why this exists
         from ..selfcheck import run_smoke
         return run_smoke()
+    if "serve-local" in argv:
+        # No Qt, no window: serve mode straight from the installed app
+        # ("Transmute serve-local"). The GUI's dialog is the same
+        # ServeLauncher; this is its headless sibling, so the shipped
+        # frozen build can hand out a LAN link without opening the GUI -
+        # and the VM harness can drive real conversions through the exact
+        # binary users run. Ctrl+C stops it. Transmute always stays local.
+        import time as _time
+        from ..serve.launcher import ServeLauncher
+        port = 8765
+        if "--serve-port" in argv:
+            port = int(argv[argv.index("--serve-port") + 1])
+        ln = ServeLauncher()
+        status = ln.start("local", port=port)
+        if not status.get("running"):
+            msg = ln.error or "serve could not start"
+            if sys.stdout:
+                print(msg, file=sys.stderr)
+            return 1
+        if sys.stdout:
+            print(f"serving on {status['url']} (Ctrl+C to stop)", flush=True)
+        try:
+            while ln.running:
+                _time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        ln.stop()
+        return 0
     from PySide6.QtWidgets import QApplication
     app = QApplication(argv if argv is not None else sys.argv)
     win = MainWindow()

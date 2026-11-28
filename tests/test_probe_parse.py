@@ -185,8 +185,13 @@ def test_filter_probe_handles_narrow_flag_columns_and_trials_chain(tmp_path, mon
     calls: list = []
     monkeypatch.setattr(cap_mod, "_run_tonemap_trial",
                         lambda f: calls.append(f) or True)
+    # animated-picture trials hit real files: stub them, their own behaviour
+    # is covered against real ffmpeg in tests/test_video_animation.py
+    monkeypatch.setattr(cap_mod, "_run_gif_anim_trial", lambda f, p: True)
+    monkeypatch.setattr(cap_mod, "_run_webp_anim_trial", lambda f, p: True)
     got = cap_mod._probe_ffmpeg_filters(Path("/fake/ffmpeg"))
-    assert got == {"zscale": True, "tonemap": True, "tonemap_chain": True}
+    assert got == {"zscale": True, "tonemap": True, "tonemap_chain": True,
+                   "gif_anim": True, "webp_anim": True}
     assert calls == [Path("/fake/ffmpeg")]
     # listed but chain trial fails (e.g. libzimg-less): must report False
     monkeypatch.setattr(cap_mod, "_run_tonemap_trial", lambda f: False)

@@ -19,7 +19,7 @@ from ..probe.capability import CapabilityReport, CapabilityProber
 # Target -> output suffix. Video gets a container known to carry the codec
 # without exotic muxing (webm for VP8/VP9, mkv otherwise); everything else
 # mirrors the target name.
-_SUFFIX = {"vp8": ".webm", "vp9": ".webm"}
+_SUFFIX = {"vp8": ".webm", "vp9": ".webm", "gif": ".gif", "webp": ".webp"}
 
 
 # Suffixes the GUI offers as remux targets (F2). .ts is included although
@@ -361,6 +361,7 @@ class ConverterController:
         "opus": "Opus", "mp3": "MP3", "aac": "AAC", "flac": "FLAC",
         "alac": "ALAC", "vorbis": "Vorbis",
         "webp": "WebP", "webp(animated)": "WebP (animated)",
+        "gif": "GIF (animated)",
         "avif": "AVIF", "png": "PNG", "jpeg": "JPEG",
         "pdf (page)": "PDF page",
         "pdf (lossless smaller)": "Smaller PDF",
@@ -383,7 +384,8 @@ class ConverterController:
         "alac": "Apple lossless (iPhone/Music)",
         "vorbis": "older Ogg format audio",
         "webp": "much smaller than JPEG",
-        "webp(animated)": "keeps GIF motion and loop count",
+        "webp(animated)": "keeps every frame and its exact timing, loop preserved",
+        "gif": "keeps every frame and its timing; sound is removed (GIF has no sound)",
         "avif": "newest and smallest, needs recent apps",
         "pdf (page)": "print/share - one page per picture",
         "png": "lossless, exact pixels",
@@ -858,6 +860,11 @@ class ConverterController:
         speaks -qp 0..255. None for non-video targets (engine has no
         quality knob there)."""
         if category != "video" or not target:
+            return None
+        if target.split("(")[0].strip() in ("gif", "webp"):
+            # Animated pictures: the engine ignores the quality knob (GIF has
+            # a fixed 256-colour palette pipeline; WebP uses a fixed default).
+            # Better no slider than a slider that does nothing.
             return None
         if self._video_engine is None:
             from ..engines.video import VideoEngine

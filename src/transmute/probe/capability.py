@@ -38,7 +38,9 @@ from ..engines.base import CommandResult, run_command
 from ..paths import paths
 from .engines import EngineManager, STATUS_OK
 
-SCHEMA_VERSION = 11  # 10 -> 11: audio encoder trials became REAL file
+SCHEMA_VERSION = 12  # 11 -> 12: report.filters gained gif_anim/webp_anim
+                     # (executed animated-picture trials); cached reports
+                     # lack the keys and must not gate the new matrix rows.
 # round-trips (encode -> ffprobe duration). Old caches can carry encoders
 # that pass a -f null sink and then silently truncate real files - measured
 # with MediaFoundation mp3_mf on Windows (2.00s in, 0.60s out, exit 0).
@@ -73,6 +75,57 @@ def _run_tonemap_trial(ffmpeg: Path) -> bool:
            "-f", "lavfi", "-i", "color=c=black:s=64x32:d=0.2,format=yuv420p10le",
            "-vf", TONEMAP_VFILTER, "-f", "null", "-"]
     return run_command(cmd, timeout_s=25).ok
+
+
+# ------------------------------------------------- animated-picture trials
+# 2026-11-28 lesson (mp3_mf): a trial that only checks the exit code, or
+# encodes to -f null, VERIFIES LIARS. These trials must write a real animated
+# file and DECODE IT BACK: a frame count >= 2 read out of the file itself is
+# the proof the format pipeline works on this machine. Null sinks forbidden.
+def _trial_frame_count(ffprobe: Path | None, path: Path) -> int:
+    """Decoded frame count of an output file, read with full decode
+    (-count_frames). 0 = unreadable/undecodable - never trusted."""
+    if ffprobe is None or not path.is_file() or path.stat().st_size == 0:
+        return 0
+    res = run_command([ffprobe, "-v", "error", "-select_streams", "v:0",
+                       "-count_frames", "-show_entries",
+                       "stream=nb_read_frames", "-of", "csv=p=0", str(path)],
+                      timeout_s=60)
+    try:
+        return int((res.stdout or "").strip() or "0")
+    except ValueError:
+        return 0
+
+
+def _run_gif_anim_trial(ffmpeg: Path, ffprobe: Path | None) -> bool:
+    """The EXACT production chain (palettegen/paletteuse, 256-colour, loop
+    forever) run against a synthetic multi-frame source, proven by decoding
+    the written GIF back frame by frame."""
+    with tempfile.TemporaryDirectory(prefix="tm-probe-gif-") as td:
+        out = Path(td) / "trial.gif"
+        cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+               "-f", "lavfi", "-i", "testsrc=size=64x32:duration=0.5:rate=8",
+               "-filter_complex",
+               "[0:v]split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse[v]",
+               "-map", "[v]", "-loop", "0", "-an", "-f", "gif", "-y", str(out)]
+        if not run_command(cmd, timeout_s=30).ok:
+            return False
+        return _trial_frame_count(ffprobe, out) >= 2
+
+
+def _run_webp_anim_trial(ffmpeg: Path, ffprobe: Path | None) -> bool:
+    """libwebp_anim must exist AND round-trip: many distro ffmpeg builds
+    carry only static libwebp - the encoder lookup would lie, the decode
+    cannot."""
+    with tempfile.TemporaryDirectory(prefix="tm-probe-webp-") as td:
+        out = Path(td) / "trial.webp"
+        cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+               "-f", "lavfi", "-i", "testsrc=size=64x32:duration=0.5:rate=8",
+               "-map", "0:v:0", "-c:v", "libwebp_anim", "-q:v", "80",
+               "-loop", "0", "-an", "-f", "webp", "-y", str(out)]
+        if not run_command(cmd, timeout_s=30).ok:
+            return False
+        return _trial_frame_count(ffprobe, out) >= 2
 
 # ---------------------------------------------------------------- encoder knowledge
 
@@ -532,9 +585,10 @@ def _probe_pillow() -> dict[str, Any]:
     return out
 
 
-def _probe_ffmpeg_filters(ffmpeg: Path) -> dict[str, bool]:
+def _probe_ffmpeg_filters(ffmpeg: Path, ffprobe: Path | None = None) -> dict[str, bool]:
     res = run_command([ffmpeg, "-hide_banner", "-filters"], timeout_s=25)
-    have = {"zscale": False, "tonemap": False, "tonemap_chain": False}
+    have = {"zscale": False, "tonemap": False, "tonemap_chain": False,
+            "gif_anim": False, "webp_anim": False}
     # ffmpeg's flag-column width varies by version (2 chars in ffmpeg 9) -
     # anchor on the IO spec (e.g. "V->V") instead of a fixed flag width.
     pat = re.compile(r"^\s*[.TSCCUHB]+\s+([a-z0-9_]+)\s+[A-Z]{1,2}->[A-Z]{1,2}\b")
@@ -545,6 +599,10 @@ def _probe_ffmpeg_filters(ffmpeg: Path) -> dict[str, bool]:
     if have["zscale"] and have["tonemap"]:
         # list-check is necessary, not sufficient: run the actual chain.
         have["tonemap_chain"] = _run_tonemap_trial(ffmpeg)
+    # Animated pictures: availability ONLY from executed real-file trials
+    # (see the mp3_mf lesson above) - never from -filters or -encoders lists.
+    have["gif_anim"] = _run_gif_anim_trial(ffmpeg, ffprobe)
+    have["webp_anim"] = _run_webp_anim_trial(ffmpeg, ffprobe)
     return have
 
 
@@ -731,7 +789,8 @@ class CapabilityProber:
         disable_gpu = gpu_force_disabled()
 
         caps: list[EncoderCapability] = []
-        filters = {"zscale": False, "tonemap": False, "tonemap_chain": False}
+        filters = {"zscale": False, "tonemap": False, "tonemap_chain": False,
+                   "gif_anim": False, "webp_anim": False}
         if ffmpeg is None:
             caveats.append("ffmpeg not found: no codec capability can be probed; "
                            "video/audio matrix rows will be unavailable.")
@@ -784,7 +843,7 @@ class CapabilityProber:
                 cap.reason = reason if not ok else ""
                 caps.append(cap)
             self._note(total, total, "checking HDR tone-map chain")
-            filters = _probe_ffmpeg_filters(ffmpeg)
+            filters = _probe_ffmpeg_filters(ffmpeg, ffprobe)
 
         if disable_gpu:
             caveats.append("GPU probing disabled by TRANSMUTE_DISABLE_GPU "
@@ -881,6 +940,28 @@ def build_matrix(rep: CapabilityReport) -> list[MatrixRow]:
                 compat_flag=c.compat_flag,
                 note=("" if c.verified else (c.skipped or c.reason or "trial encode failed"))[:300],
             ))
+
+    # Animated pictures (added 2026-11-28 at the user's request): availability
+    # is the executed real-file trial on THIS machine, same doctrine as every
+    # other row. Motion fidelity is enforced later by the engine's verify
+    # (duration AND frame rate must be unchanged); the rows say so honestly.
+    fl = getattr(rep, "filters", None)
+    fl = fl if isinstance(fl, dict) else {}
+    rows.append(MatrixRow(
+        "video", "gif", "ffmpeg (palette pipeline)",
+        available=bool(fl.get("gif_anim")), verified=bool(fl.get("gif_anim")),
+        note=("animated pictures: same frames, same length, same frame rate - "
+              "GIF rounds each frame's delay to 1/100s, so the total stays exact; "
+              "sound is removed") if fl.get("gif_anim") else
+             "this ffmpeg failed its own animated-GIF trial (real file written "
+             "and decoded back)"))
+    rows.append(MatrixRow(
+        "video", "webp(animated)", "ffmpeg/libwebp_anim",
+        available=bool(fl.get("webp_anim")), verified=bool(fl.get("webp_anim")),
+        note=("animated WebP: every frame kept with its exact timing, "
+              "loop preserved; sound is removed") if fl.get("webp_anim") else
+             "no animated WebP on this machine (libwebp_anim missing or its "
+             "real-file trial failed)"))
 
     for codec in ("opus", "flac", "vorbis", "mp3", "aac", "alac"):
         cands = by_target.get(codec, [])

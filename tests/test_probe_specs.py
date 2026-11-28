@@ -94,16 +94,20 @@ def test_webp_animated_row_follows_the_engine_gate(tmp_path):
 
     def rows_for(feat):
         rep = SimpleNamespace(engines={}, encoders=[], pdf_backends={},
-                              image_backends={"features": feat})
+                              filters={}, image_backends={"features": feat})
         return build_matrix(rep)
 
     rows = rows_for({"webp": False, "gif": True, "avif": False, "png": True})
-    anim = [r for r in rows if r.target == "webp(animated)"]
+    anim = [r for r in rows if r.target == "webp(animated)" and r.category == "image"]
     assert anim and anim[0].available is False
     assert "WebP" in anim[0].note
     rows = rows_for({"webp": True, "gif": False, "avif": False, "png": True})
-    anim = [r for r in rows if r.target == "webp(animated)"]
+    anim = [r for r in rows if r.target == "webp(animated)" and r.category == "image"]
     assert anim and anim[0].available is True
+    # the VIDEO animated-WebP row is a different pipeline (ffmpeg) and is
+    # gated ONLY by its own executed filter trial - never by Pillow's:
+    video = [r for r in rows if r.target == "webp(animated)" and r.category == "video"]
+    assert video and video[0].available is False   # empty filters = never claimed
 
 
 def test_probe_key_moves_when_gpu_devices_change(tmp_path, monkeypatch):

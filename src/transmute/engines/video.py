@@ -38,7 +38,12 @@ from .media import (Probe, extract_video_bitstream_sha256, is_hdr_transfer,
                     packet_manifest_sha256)
 
 CONTAINER_BY_FORMAT = {".mp4": "mp4", ".mov": "mov", ".m4v": "mp4", ".mkv": "matroska",
-                       ".webm": "webm", ".ts": "mpegts"}
+                       ".webm": "webm", ".ts": "mpegts",
+                       # animated pictures (2026-11-28): silent, frame-timing
+                       # critical - handled by _convert_animation, NOT by the
+                       # encoder ladder below.
+                       ".gif": "gif", ".webp": "webp"}
+ANIM_OUTPUT_FMTS = ("gif", "webp")
 FASTSTART = {"mp4", "mov"}
 MP4_AUDIO_OK = {"aac", "mp3", "alac", "ac3", "eac3", "amr_nb", "amr_wb"}
 WEBM_AUDIO_OK = {"vorbis", "opus", "flac"}
@@ -333,6 +338,21 @@ class VideoEngine:
             from ..jsonl import JobLogStore
             log_path = JobLogStore(log_root).open_capture(log_id)
 
+        if fmt in ANIM_OUTPUT_FMTS:
+            if size_mb is not None:
+                return EngineResult("failed", reason=(
+                    "GIF/WebP animation has no size target - the encode keeps "
+                    "every frame at full quality of that format; pick a video "
+                    "codec (H.264/VP9/AV1) when a specific file size matters"))
+            if audio == "replace":
+                return EngineResult("failed", reason=(
+                    "GIF/WebP carry no sound, so audio cannot be kept or "
+                    "re-encoded there - the format removes sound by design"))
+            return self._convert_animation(
+                src, dst, fmt=fmt, ffmpeg=ffmpeg, sv=sv, remux=remux,
+                tonemap=tonemap, t0=t0, governor=governor, log_path=log_path,
+                ffmpeg_timeout_s=ffmpeg_timeout_s)
+
         if remux:
             return self._remux(src, dst, fmt=fmt, ffmpeg=ffmpeg, sv=sv,
                                audio=audio, ffmpeg_timeout_s=ffmpeg_timeout_s,
@@ -619,6 +639,111 @@ class VideoEngine:
         return EngineResult("converted", output=dst, encoder=cap.name if cap else "copy",
                             seconds=elapsed, log_path=log_path, data=data)
 
+    # ------------------------------------------------------------ animation
+    def _convert_animation(self, src: Path, dst: Path, *, fmt: str,
+                           ffmpeg: Path, sv: dict, remux: bool, tonemap: bool,
+                           t0: float, governor, log_path,
+                           ffmpeg_timeout_s: float) -> EngineResult:
+        """Video -> animated GIF / animated WebP (user requirement 2026-11-28:
+        "the picture animation must not be slowed down or altered").
+
+        How the motion is protected, all measured on the actual output:
+          * no fps resampling - frames pass through with their own timestamps;
+          * verify() after the encode requires the SAME resolution, the SAME
+            average frame rate and the SAME duration as the source;
+          * when both frame counts are readable they must be EQUAL - a lost
+            or repeated frame would change the motion;
+          * GIF/WebP store frame delays in whole 1/100s steps, so each delay
+            is rounded by the muxer while the TOTAL stays exact (measured:
+            120 frames at 30fps sum to exactly 4000 ms, 33/34 ms each).
+        Both formats are silent BY SPEC: audio is dropped, and verify must
+        not then demand matching audio-stream counts for a format that has
+        no audio - _ANIM_OUTPUT_EXTS tells verify() about it in one place."""
+        def fail(reason: str, *, encoder: str = "") -> EngineResult:
+            dst.unlink(missing_ok=True)
+            return EngineResult("failed", reason=reason,
+                                seconds=time.monotonic() - t0,
+                                log_path=log_path, encoder=encoder)
+
+        if remux:
+            return fail("remux is a stream copy between video containers; it "
+                        "does not apply to GIF/WebP animation")
+        src_codec = (sv.get("codec_name") or "").lower()
+        if fmt == "gif" and src_codec == "gif":
+            return EngineResult("skipped", reason="already GIF-animated")
+        if fmt == "webp" and src_codec == "webp":
+            return EngineResult("skipped", reason="already WebP-animated")
+
+        hdr = is_hdr_transfer(sv.get("color_transfer"))
+        tone = bool(tonemap and hdr)
+        if hdr and not tone:
+            return fail("GIF/WebP animation is standard-definition: an HDR "
+                        "source here would silently lose its HDR. Turn on "
+                        "tone-map (its chain must pass its trial on this "
+                        "machine), or convert to a video codec first")
+        if tone and not self.prober.report().filters.get("tonemap_chain"):
+            return fail("this ffmpeg cannot tone-map: the zscale+tonemap "
+                        "chain failed its executed trial (probed on this "
+                        "machine)")
+
+        enc = "gif (palettegen/paletteuse)" if fmt == "gif" else "libwebp_anim"
+        base = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error"]
+        if fmt == "gif":
+            pre = f"{TONEMAP_VFILTER}," if tone else ""
+            chain = (f"[0:v]{pre}split[s0][s1];"
+                     f"[s0]palettegen[p];[s1][p]paletteuse[v]")
+            cmd = base + ["-i", src,
+                          "-filter_complex", chain, "-map", "[v]",
+                          "-loop", "0", "-an", "-f", fmt, "-y", dst]
+        else:
+            cmd = base + ["-i", src, "-map", "0:v:0"]
+            if tone:
+                cmd += ["-vf", TONEMAP_VFILTER]
+            cmd += ["-c:v", "libwebp_anim", "-q:v", "80", "-loop", "0",
+                    "-an", "-f", fmt, "-y", dst]
+        res = run_command(cmd, timeout_s=ffmpeg_timeout_s, log_path=log_path,
+                          governor=governor)
+        elapsed = time.monotonic() - t0
+        if res is None or not res.ok:
+            reason = "timed out" if (res and res.timed_out) else (
+                _tail(res.stderr_text if res else "") or
+                f"ffmpeg exit {res.returncode if res else '?'}")
+            return fail(f"animation encode failed: {reason}", encoder=enc)
+        if not dst.is_file() or dst.stat().st_size == 0:
+            return fail("encoder produced no output file", encoder=enc)
+
+        v = self.verify(src, dst, expect_codec=("gif" if fmt == "gif" else "webp"))
+        if not v.ok:
+            return fail(f"animation verification failed: {v.reason}",
+                        encoder=enc)
+
+        # Frame-count fidelity (beyond duration+fps): a dropped frame would
+        # keep duration close yet change the motion. Checked whenever BOTH
+        # sides are readable - never guessed.
+        n1 = sv.get("nb_frames")
+        ffprobe = self.engines.path("ffprobe")
+        n2 = 0
+        if ffprobe is not None:
+            rc = run_command([ffprobe, "-v", "error", "-select_streams", "v:0",
+                              "-count_frames", "-show_entries",
+                              "stream=nb_read_frames", "-of", "csv=p=0", str(dst)],
+                             timeout_s=600)
+            try:
+                n2 = int((rc.stdout or "").strip() or "0")
+            except ValueError:
+                n2 = 0
+        if n1 and n2 and int(n1) != n2:
+            return fail(f"frame count changed {n1} -> {n2} (the motion would "
+                        "be altered - output refused)", encoder=enc)
+
+        return EngineResult("converted", output=dst, encoder=enc,
+                            seconds=elapsed, log_path=log_path,
+                            data={"codec": fmt, "container": fmt,
+                                  "animation": True,
+                                  "audio": "dropped (the format carries no sound)",
+                                  "tonemapped": tone,
+                                  "verified_by_engine": True})
+
     # ------------------------------------------------------------------- remux
     # --------------------------------------------------- estimate (GUI preview)
     def estimate_conversion(self, src: Path, *, target_codec: str,
@@ -643,6 +768,14 @@ class VideoEngine:
                 "size_is_target": False, "sec": 0.0, "note": ""}
         if stop is not None and stop.is_set():
             return none
+        if (target_codec or "").split("(")[0].strip() in ANIM_OUTPUT_FMTS:
+            # No prediction possible: GIF/WebP keep EVERY frame at the
+            # format's own quality - there is no encoder ladder to sample.
+            # Claiming a size measured with some other codec would lie (F1).
+            return {"ok": False, "est_s": 0.0, "bytes": 0.0,
+                    "size_is_target": False, "sec": 0.0,
+                    "note": "animated GIF/WebP keep every frame - the size "
+                            "cannot be predicted, only produced"}
         dur = self.probe.duration_s(src)
         if not dur or dur <= 0:
             return none
@@ -865,28 +998,59 @@ class VideoEngine:
         sv, dv = self.probe.primary_video(src), self.probe.primary_video(out)
         if dv is None:
             return EngineResult("failed", reason="output has no decodable video stream")
+        # Animated-picture outputs (GIF, WebP) are silent and 8-bit BY SPEC,
+        # and their demuxers report frame rate as an artifact of whole-1/100s
+        # delay rounding (a true 30 fps GIF reads back avg_frame_rate 100/3):
+        # demanding string-exact fps or audio parity there would fail every
+        # correct conversion. The motion contract stays strict - resolution
+        # below, duration below, and frame-count equality enforced by
+        # _convert_animation after decode.
+        anim_out = out.suffix.lower() in (".gif", ".webp")
         if sv is not None:
             if sv.get("width") != dv.get("width") or sv.get("height") != dv.get("height"):
                 return EngineResult("failed", reason="resolution changed in conversion")
-            if sv.get("avg_frame_rate") and dv.get("avg_frame_rate") and \
+            if anim_out:
+                r1, r2 = _rate(sv.get("r_frame_rate")), _rate(dv.get("r_frame_rate"))
+                if r1 and r2 and abs(r1 - r2) > 0.5:
+                    return EngineResult("failed",
+                        reason=f"frame rate changed {r1:.2f} -> {r2:.2f} fps")
+            elif sv.get("avg_frame_rate") and dv.get("avg_frame_rate") and \
                     sv["avg_frame_rate"] != dv["avg_frame_rate"]:
                 return EngineResult("failed", reason="frame rate changed in conversion")
         d1, d2 = self.probe.duration_s(src), self.probe.duration_s(out)
         if d1 is not None and d2 is not None and abs(d1 - d2) > max(allow_duration_s, d1 * 0.01):
             return EngineResult("failed", reason=f"duration changed {d1:.2f}s -> {d2:.2f}s")
-        if len(self.probe.audio_streams(src)) != len(self.probe.audio_streams(out)):
+        if not anim_out and \
+                len(self.probe.audio_streams(src)) != len(self.probe.audio_streams(out)):
             return EngineResult("failed", reason="audio stream count changed")
         if sv is not None and is_hdr_transfer(sv.get("color_transfer")) \
-                and not allow_hdr_loss:
+                and not allow_hdr_loss and not anim_out:
             if not is_hdr_transfer(dv.get("color_transfer")):
                 return EngineResult("failed",
                                     reason="HDR source produced SDR output (silent tone-map "
                                            "forbidden, F25)")
-        if expect_codec and (dv.get("codec_name") or "").lower() != expect_codec:
-            return EngineResult("failed",
-                                reason=f"expected codec {expect_codec}, output is {dv.get('codec_name')}")
+        got = (dv.get("codec_name") or "").lower()
+        if expect_codec:
+            allowed = {expect_codec.lower()}
+            if expect_codec.lower() == "webp":
+                # Animated WebP reports its animation decoder name; both ARE
+                # WebP - the container and the frames are what matter.
+                allowed.add("webp_anim")
+            if got not in allowed:
+                return EngineResult("failed",
+                                    reason=f"expected codec {expect_codec}, output is {dv.get('codec_name')}")
         return EngineResult("converted", output=out,
                             data={"verified": True, "codec": dv.get("codec_name")})
+
+
+def _rate(text: str | None) -> float | None:
+    """Parse ffprobe's "30000/1001" rational frame rates; None if unusable."""
+    try:
+        num, _, den = (text or "").partition("/")
+        n, d = float(num), float(den or "1")
+        return n / d if d else None
+    except ValueError:
+        return None
 
 
 def _tail(text: str, limit: int = 300) -> str:

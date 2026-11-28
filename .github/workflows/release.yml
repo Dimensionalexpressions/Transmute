@@ -97,6 +97,10 @@ jobs:
           if [ "$RC" -ne 0 ]; then echo "::error::frozen smoke failed (rc $RC)"; exit 1; fi
       - name: Pack + checksum
         run: |
+          # --smoke writes its report NEXT TO the exe (frozen mode) - the
+          # build machine's report must not ship in the user's tarball:
+          # it says THIS RUNNER's engines, not theirs (VM hunt 2026-11-27).
+          rm -f dist/Transmute/transmute-smoke.log
           tar -C dist -czf Transmute-linux-x86_64.tar.gz Transmute
           sha256sum Transmute-linux-x86_64.tar.gz > SHA256SUMS.linux
           cat SHA256SUMS.linux
@@ -164,6 +168,10 @@ jobs:
       - name: Pack + checksum
         shell: pwsh
         run: |
+          # --smoke writes its report NEXT TO the exe (frozen mode); shipping
+          # the build machine's engine report inside the zip confuses users
+          # (VM hunt 2026-11-27: "qpdf missing" was the runner, not the PC).
+          Remove-Item -Force dist\Transmute\transmute-smoke.log -ErrorAction SilentlyContinue
           Compress-Archive -Path dist\Transmute -DestinationPath Transmute-windows-x86_64.zip
           $h = (Get-FileHash -Algorithm SHA256 Transmute-windows-x86_64.zip).Hash.ToLower()
           "$h  Transmute-windows-x86_64.zip" | Set-Content -Encoding ascii SHA256SUMS.windows
@@ -174,6 +182,7 @@ jobs:
           path: |
             Transmute-windows-x86_64.zip
             SHA256SUMS.windows
+            README-Windows.txt
 
   docker:
     runs-on: ubuntu-latest
@@ -246,7 +255,7 @@ jobs:
           # git remote; every gh call must carry --repo explicitly.
           # (First failure of this job died silently on exactly this.)
           if ! ls Transmute-linux-x86_64.tar.gz Transmute-windows-x86_64.zip \
-                  SHA256SUMS.linux SHA256SUMS.windows >/dev/null 2>&1; then
+                  SHA256SUMS.linux SHA256SUMS.windows README-Windows.txt >/dev/null 2>&1; then
             echo "::error::artifacts missing after download: $(ls -la | tr '\n' '~' | tr ':' '-')"
             exit 1
           fi
@@ -256,6 +265,18 @@ jobs:
           machine (each under its own license; see `THIRD-PARTY-NOTICES.md` in this
           repository for full credits, licenses and links — with thanks to every
           upstream project).
+
+          Fixes in this build (found by end-to-end testing in a real Windows VM):
+          - Windows document conversions (docx → PDF/ODT/RTF/HTML/Markdown/txt)
+          work again: the conversion ran against LibreOffice's console binary,
+          which exits silently with no output on Windows; it now runs through
+          the launcher (no console popups).
+          - Audio targets mux into real containers: `vorbis` → `.ogg`,
+          raw PCM → `.wav` (they were refused as "unknown audio target").
+          - Picture conversions that would grow the file now say
+          "output would be N% bigger: original kept" instead of a negative percentage.
+          - The Windows zip no longer carries the build machine's smoke log,
+          and `README-Windows.txt` ships beside the zip in this release.
 
           Install the engines once:
 
@@ -291,6 +312,7 @@ jobs:
           if ! gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
               Transmute-linux-x86_64.tar.gz \
               Transmute-windows-x86_64.zip \
+              README-Windows.txt \
               SHA256SUMS.txt --clobber 2>/tmp/gh3.err; then
             echo "::error::release upload failed: $(tr '\n' '~' </tmp/gh3.err | tr ':' '-' | tail -c 380)"
             exit 1

@@ -112,7 +112,10 @@ class DocumentEngine:
 
     def _via_libreoffice(self, src: Path, dst: Path, *, timeout_s: float,
                          governor, log_path, t0: float) -> EngineResult:
-        lo = self.engines.path("libreoffice")
+        # RUN via the launcher, not the probe binary: soffice.bin exits rc 81
+        # writing nothing when asked to convert (WinBoat VM 2026-11-27);
+        # soffice.exe completes and exits cleanly. Probe stays on soffice.bin.
+        lo = self.engines.launcher("libreoffice")
         assert lo is not None
         with tempfile.TemporaryDirectory(prefix="transmute-lo-", dir=str(dst.parent)) as td:
             outdir = Path(td) / "out"
@@ -274,7 +277,7 @@ class DocumentEngine:
 
     def _lo_export(self, src: Path, dst: Path, target: str, *, timeout_s: float,
                    governor, log_path, t0: float) -> EngineResult:
-        lo = self.engines.path("libreoffice")
+        lo = self.engines.launcher("libreoffice")  # launcher, not probe bin - see _via_libreoffice
         assert lo is not None
         with tempfile.TemporaryDirectory(prefix="transmute-lo-",
                                          dir=str(dst.parent)) as td:

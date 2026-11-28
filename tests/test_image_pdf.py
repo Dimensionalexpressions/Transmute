@@ -144,3 +144,17 @@ def test_picker_words_and_suffix_without_colliding_with_document_pdf():
     assert "PDF page" not in doc.label
     assert c.suffix_for("image", "pdf (page)") == ".pdf"
     assert c.dst_for("/x/a.png", "image", "pdf (page)", "/out").name == "a.pdf"
+
+
+def test_kept_reason_says_bigger_when_output_grows(tmp_path, fixtures):
+    # The savings gate must state the DIRECTION honestly: an encode that is
+    # larger than the original used to print "only -94.7% smaller"
+    # (WinBoat VM battery, 2026-11-27 - noise fixture webp > png).
+    from transmute.engines.image import ImageEngine
+    dst = tmp_path / "grown.png"
+    r = ImageEngine().convert(fixtures["jpg"], dst)
+    assert r.outcome == "kept"
+    assert not dst.exists()
+    assert "bigger" in r.reason and "-" not in r.reason
+    pct = float(r.reason.split()[3].rstrip("%"))
+    assert pct > 0

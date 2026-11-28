@@ -871,6 +871,13 @@ class ConverterController:
     # -------------------------------------------------------------- jobs
     def suffix_for(self, category: str, target: str) -> str:
         base = target.split("(")[0].strip()
+        if category == "audio":
+            # codec names are targets, but ffmpeg muxes by CONTAINER suffix:
+            # vorbis lives in .ogg and raw PCM in .wav - ".vorbis"/".pcm_s16le"
+            # are not containers, so the engine refused targets the picker
+            # advertised (WinBoat VM, 2026-11-27).
+            base = {"vorbis": "ogg", "pcm_s16le": "wav"}.get(base, base)
+            return "." + base
         if category == "video":
             return _SUFFIX.get(base, ".mkv")
         if category == "document":

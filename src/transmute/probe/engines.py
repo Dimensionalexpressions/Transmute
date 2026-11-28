@@ -273,6 +273,26 @@ class EngineManager:
         info = self.get(name)
         return info.path if info.available else None
 
+    def launcher(self, name: str) -> Path | None:
+        """Executable to RUN a conversion with - may differ from the probe
+        target. LibreOffice on Windows: the probe answers pipes from
+        soffice.bin (soffice.exe never writes to them and once flashed a
+        console - see KNOWN_ENGINES notes), but running the real headless
+        conversion through soffice.bin exits rc 81 and writes NOTHING
+        (WinBoat VM, Win11 26200, LO 26.8.3, measured 2026-11-27). The
+        launcher soffice.exe runs the conversion and exits; run_command's
+        CREATE_NO_WINDOW keeps it console-free, so conversions use the
+        launcher while the probe stays on the direct binary. Linux: no
+        launcher split - the probed command IS the runner."""
+        path = self.path(name)
+        if path is None:
+            return None
+        if _IS_WINDOWS and path.name.lower() == "soffice.bin":
+            exe = path.parent / "soffice.exe"
+            if exe.is_file():
+                return exe
+        return path
+
     def is_available(self, name: str) -> bool:
         return self.get(name).available
 

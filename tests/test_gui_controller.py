@@ -256,3 +256,16 @@ class TestRealImageEndToEnd:
         snap = c.snapshot()
         assert len(snap) == 1 and snap[0].state == "replaced"
         assert snap[0].encoder  # engine identity recorded for audit
+
+
+def test_audio_target_suffixes_are_real_containers():
+    # ffmpeg muxes by CONTAINER suffix; codec names like vorbis/pcm_s16le
+    # are not containers (WinBoat VM, 2026-11-27: ".vorbis" was refused by
+    # the engine although the picker advertised it).
+    c = ConverterController(report_provider=_report)
+    assert c.suffix_for("audio", "vorbis") == ".ogg"
+    assert c.suffix_for("audio", "pcm_s16le") == ".wav"
+    assert c.suffix_for("audio", "opus") == ".opus"
+    assert c.suffix_for("audio", "mp3") == ".mp3"
+    assert c.suffix_for("audio", "flac") == ".flac"
+    assert c.dst_for("/x/a.wav", "audio", "vorbis", "/out").name == "a.ogg"

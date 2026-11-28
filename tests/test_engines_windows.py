@@ -94,3 +94,30 @@ def test_qpdf_version_re_accepts_argv0_echo():
     rx = E.KNOWN_ENGINES["qpdf"].version_re
     assert rx.search("qpdf.EXE version 12.4.2").group(1) == "12.4.2"
     assert rx.search("qpdf version 11.9.1").group(1) == "11.9.1"
+
+
+def test_lo_conversions_run_via_launcher_not_probe_bin(tmp_path, win_mode, monkeypatch):
+    # soffice.bin PROBES (answers pipes) but exits rc 81 writing NOTHING when
+    # asked to CONVERT (WinBoat VM, Win11 26200, LO 26.8.3, 2026-11-27); the
+    # launcher soffice.exe completes the conversion and exits. Conversions
+    # must use the launcher; the probe keeps the direct binary.
+    prog = tmp_path / "PF" / "LibreOffice" / "program"
+    binp, exep = prog / "soffice.bin", prog / "soffice.exe"
+    binp.write_text("")
+    exep.write_text("")
+    mgr = E.EngineManager()
+    monkeypatch.setattr(mgr, "path", lambda name: binp)
+    assert mgr.launcher("libreoffice") == exep
+    exep.unlink()  # no launcher beside it: fall back to the binary itself
+    assert mgr.launcher("libreoffice") == binp
+    monkeypatch.setattr(mgr, "path", lambda name: None)
+    assert mgr.launcher("libreoffice") is None
+
+
+def test_launcher_is_identity_on_linux(tmp_path, monkeypatch):
+    monkeypatch.setattr(E, "_IS_WINDOWS", False)
+    p = tmp_path / "libreoffice"
+    p.write_text("")
+    mgr = E.EngineManager()
+    monkeypatch.setattr(mgr, "path", lambda name: p)
+    assert mgr.launcher("libreoffice") == p

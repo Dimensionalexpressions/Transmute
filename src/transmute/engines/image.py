@@ -175,8 +175,15 @@ class ImageEngine:
         # same-container re-encodes.
         if ext_out != ".pdf" and out_size >= src_size * (1.0 - min_savings_pct / 100.0):
             dst.unlink(missing_ok=True)
-            return EngineResult("kept", reason=f"only {100 * (1 - out_size / max(src_size, 1)):.1f}% "
-                                               f"smaller (<{min_savings_pct:g}%): original kept",
+            if out_size > src_size:
+                # honest direction: the encode was BIGGER - never say
+                # "only -94.7% smaller" (a negative saving is a growth)
+                note = (f"output would be {100 * (out_size / max(src_size, 1) - 1):.1f}% "
+                        f"bigger: original kept")
+            else:
+                note = (f"only {100 * (1 - out_size / max(src_size, 1)):.1f}% "
+                        f"smaller (<{min_savings_pct:g}%): original kept")
+            return EngineResult("kept", reason=note,
                                 seconds=res.seconds,
                                 data={"src_size": src_size, "out_size": out_size})
         return res
